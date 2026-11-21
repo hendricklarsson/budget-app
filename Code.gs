@@ -21,8 +21,12 @@
  *
  * SCRIPT PROPERTIES (Project Settings → Script properties)
  *   CLIENT_ID      — you add this by hand: your Google Sign-In Client ID.
+ *   ALLOWED_EMAILS — optional. Leave it out and anyone with a Google account
+ *                    can use the app. Set it to a list of emails separated by
+ *                    commas to make the app invite-only.
  *   SPREADSHEET_ID — written by setup().
  *   FOLDER_ID      — written by setup() (the "Budget App Receipts" folder).
+ *   usage:...      — written automatically: today's counts for the daily limits.
  */
 
 // ---------------------------------------------------------------------------
@@ -48,8 +52,16 @@ const CATEGORIES = ['Food', 'Transport', 'Bills', 'Shopping', 'Health',
                     'Entertainment', 'Other'];
 const MAX_AMOUNT = 1000000;
 const MAX_NOTE_LENGTH = 200;
-const MAX_RECEIPT_BYTES = 3 * 1024 * 1024; // 3 MB; a 1280px JPEG is ~200 KB
+const MAX_RECEIPT_BYTES = 2 * 1024 * 1024; // 2 MB; a 1280px JPEG is ~150 KB
 const LOCK_WAIT_MS = 10000;                 // wait up to 10 s for other saves
+
+// Daily limits, so no one (by mistake or on purpose) can fill your Drive or
+// use up Google's free quotas. Counts reset at midnight in the script's time
+// zone (Project Settings → Time zone). Normal use is far below these.
+const MAX_ADDS_PER_USER_PER_DAY = 200;
+const MAX_RECEIPTS_PER_USER_PER_DAY = 50;
+const MAX_ADDS_ALL_USERS_PER_DAY = 5000;
+const MAX_RECEIPTS_ALL_USERS_PER_DAY = 1000; // at most ~2 GB a day, usually ~150 MB
 
 // ---------------------------------------------------------------------------
 // One-time setup (run by hand from the editor)
@@ -129,6 +141,8 @@ function doPost(e) {
   try {
     const request = parseRequest_(e);
     const email = verifyIdToken_(request.idToken);
+    // Anyone may always delete their own data, even after losing access.
+    if (request.action !== 'deleteMyData') checkAllowed_(email);
     result = handleAction_(request, email);
     result.ok = true;
   } catch (err) {
@@ -162,6 +176,8 @@ function handleAction_(request, email) {
  * An error we expect and can explain to the user, with a short code the app
  * can react to:
  *   AUTH        — sign in again
+ *   FORBIDDEN   — signed in, but not on the ALLOWED_EMAILS list
+ *   LIMIT       — a daily limit was reached
  *   BAD_REQUEST — the input was wrong (message says what)
  *   NOT_FOUND   — no such entry for this user
  *   BUSY        — another save held the lock too long; try again
@@ -267,6 +283,19 @@ function verifyIdToken_(idToken) {
   return email;
 }
 
+/**
+ * If the ALLOWED_EMAILS script property is set, only those emails may use the
+ * app. If it is empty or missing, everyone may (the limits still apply).
+ */
+function checkAllowed_(email) {
+  const list = PropertiesService.getScriptProperties().getProperty('ALLOWED_EMAILS');
+  if (!list || !list.trim()) return;
+  const allowed = list.toLowerCase().split(/[\s,]+/).filter(Boolean);
+  if (allowed.indexOf(email) === -1) {
+    throw new ApiError('FORBIDDEN', 'This app is invite-only for now. Ask the developer for access.');
+  }
+}
+
 /** Returns the SHA-256 hash of a string as base64 (a short, safe cache key). */
 function sha256_(text) {
   const bytes = Utilities.computeDigest(
@@ -300,74 +329,109 @@ function listExpenses_(email) {
  * The app makes the id itself (so it can show the entry before the server
  * answers). If the same id arrives twice, e.g. a retry after a dropped
  * connection, we return the saved entry instead of making a duplicate.
+ *
+ * Why the order below: uploading a photo to Drive is the slow part (~1 s).
+ * If we did it while holding the lock, every other user's save would wait
+ * for it. So we check first, upload WITHOUT the lock, and only take the lock
+ * for the quick part: re-checking and writing the row.
  */
 function addExpense_(input, email) {
   const expense = validateExpense_(input);
   const receiptBlob = input.receipt ? decodeReceipt_(input.receipt, expense.id) : null;
+  const hasReceipt = Boolean(receiptBlob);
   const sheet = getSheet_();
 
-  return withLock_(function () {
-    // Duplicate check (inside the lock so two retries cannot both pass it).
-    const rows = readAllRows_(sheet);
-    for (let i = 0; i < rows.length; i++) {
-      if (String(rows[i][COL.id]) === expense.id) {
-        if (!isOwner_(rows[i], email)) {
-          throw new ApiError('BAD_REQUEST', 'That id is already in use.');
-        }
-        return { expense: rowToExpense_(rows[i]), duplicate: true };
+  // 1. Quick checks before uploading anything, so we never upload for nothing.
+  const existing = findRowById_(readAllRows_(sheet), expense.id);
+  if (existing) return duplicateResult_(existing, email);
+  checkLimits_(email, hasReceipt);
+
+  // 2. The slow part, outside the lock.
+  const receiptFileId = hasReceipt ? getReceiptFolder_().createFile(receiptBlob).getId() : '';
+
+  try {
+    return withLock_(function () {
+      // 3. Check again: another request may have saved this id or used up a
+      //    limit while we were uploading. Only now is the answer certain.
+      const found = findRowById_(readAllRows_(sheet), expense.id);
+      if (found) {
+        trashFile_(receiptFileId);
+        return duplicateResult_(found, email);
       }
-    }
+      checkLimits_(email, hasReceipt);
+      const saved = writeExpenseRow_(sheet, expense, email, receiptFileId);
+      recordUsage_(email, hasReceipt);
+      return { expense: saved };
+    });
+  } catch (err) {
+    // Don't leave an orphan photo in Drive if the row was not saved.
+    trashFile_(receiptFileId);
+    throw err;
+  }
+}
 
-    // Save the receipt file first, so the row can point to it.
-    let receiptFileId = '';
-    if (receiptBlob) {
-      receiptFileId = getReceiptFolder_().createFile(receiptBlob).getId();
-    }
-
-    const row = [];
-    row[COL.id] = expense.id;
-    row[COL.email] = email;
-    row[COL.date] = expense.date;
-    row[COL.amount] = expense.amount;
-    row[COL.category] = expense.category;
-    row[COL.note] = safeText_(expense.note);
-    row[COL.receiptFileId] = receiptFileId;
-    row[COL.createdAt] = new Date().toISOString();
-    row[COL.deleted] = false;
-
-    try {
-      const range = sheet.getRange(sheet.getLastRow() + 1, 1, 1, HEADERS.length);
-      range.setNumberFormats([COLUMN_FORMATS]); // set text format BEFORE writing
-      range.setValues([row]);
-    } catch (err) {
-      // Don't leave an orphan receipt file if the row could not be written.
-      if (receiptFileId) DriveApp.getFileById(receiptFileId).setTrashed(true);
-      throw err;
-    }
-    return { expense: rowToExpense_(row) };
-  });
+/** Finds the row with this id. Returns the row, or null. */
+function findRowById_(rows, id) {
+  for (let i = 0; i < rows.length; i++) {
+    if (String(rows[i][COL.id]) === id) return rows[i];
+  }
+  return null;
 }
 
 /**
- * action "delete": soft delete, i.e. marks the row deleted = TRUE instead of
- * removing it. Safer (a mistake can be undone in the Sheet) and leaves no
- * gaps that could shift row numbers while another request is running.
- * The receipt file is kept; "Delete my data" removes everything for real.
+ * The answer when an id already exists: the saved entry if it is the user's
+ * own (a retry), or an error if it belongs to someone else.
+ */
+function duplicateResult_(row, email) {
+  if (!isOwner_(row, email)) throw new ApiError('BAD_REQUEST', 'That id is already in use.');
+  return { expense: rowToExpense_(row), duplicate: true };
+}
+
+/**
+ * Appends one expense as a new row and returns it as the app expects.
+ * Must be called while holding the lock (see withLock_).
+ */
+function writeExpenseRow_(sheet, expense, email, receiptFileId) {
+  const row = [];
+  row[COL.id] = expense.id;
+  row[COL.email] = email;
+  row[COL.date] = expense.date;
+  row[COL.amount] = expense.amount;
+  row[COL.category] = expense.category;
+  row[COL.note] = safeText_(expense.note);
+  row[COL.receiptFileId] = receiptFileId;
+  row[COL.createdAt] = new Date().toISOString();
+  row[COL.deleted] = false;
+
+  const range = sheet.getRange(sheet.getLastRow() + 1, 1, 1, HEADERS.length);
+  range.setNumberFormats([COLUMN_FORMATS]); // set text format BEFORE writing
+  range.setValues([row]);
+  return rowToExpense_(row);
+}
+
+/**
+ * action "delete": removes the entry's row for real and moves its receipt
+ * photo to Drive's trash. When a user deletes something, they expect it gone.
+ * (Older versions only marked rows deleted = TRUE; run purgeDeletedRows()
+ * once to clean those up.) The photo is trashed after the lock is released,
+ * so other users' saves don't wait for Drive.
  */
 function deleteExpense_(id, email) {
   const cleanId = validateId_(id);
   const sheet = getSheet_();
-  return withLock_(function () {
+  const receiptFileId = withLock_(function () {
     const rows = readAllRows_(sheet);
     for (let i = 0; i < rows.length; i++) {
       if (String(rows[i][COL.id]) === cleanId && isOwner_(rows[i], email) && !isDeleted_(rows[i])) {
         // +2: one for the header row, one because sheet rows start at 1.
-        sheet.getRange(i + 2, COL.deleted + 1).setValue(true);
-        return { id: cleanId };
+        sheet.deleteRow(i + 2);
+        return String(rows[i][COL.receiptFileId] || '');
       }
     }
     throw new ApiError('NOT_FOUND', 'That entry was not found.');
   });
+  trashFile_(receiptFileId);
+  return { id: cleanId };
 }
 
 /**
@@ -399,19 +463,41 @@ function getReceipt_(id, email) {
  * after 30 days). Rows are deleted bottom-up so row numbers above stay valid.
  */
 function deleteMyData_(email) {
+  const removed = removeRows_(function (row) { return isOwner_(row, email); });
+  return { deletedRows: removed.rows, deletedReceipts: trashFiles_(removed.fileIds) };
+}
+
+/**
+ * Run this ONCE by hand from the editor (choose purgeDeletedRows, click Run)
+ * to clean up rows that older versions only marked deleted = TRUE: removes
+ * those rows and trashes their receipt photos. Safe to run again any time.
+ */
+function purgeDeletedRows() {
+  const removed = removeRows_(isDeleted_);
+  const trashed = trashFiles_(removed.fileIds);
+  Logger.log('Removed %s old deleted rows and trashed %s receipt photos.', removed.rows, trashed);
+}
+
+/**
+ * Deletes every row for which shouldRemove(row) is true, and returns how many
+ * rows went plus the receipt file ids they pointed to (for the caller to
+ * trash AFTER the lock is released, since Drive is slow).
+ * Rows are deleted bottom-up so the row numbers above stay valid, with
+ * neighbouring rows grouped into one call.
+ */
+function removeRows_(shouldRemove) {
   const sheet = getSheet_();
   return withLock_(function () {
     const rows = readAllRows_(sheet);
     const rowNumbers = [];
     const fileIds = [];
     rows.forEach(function (row, i) {
-      if (isOwner_(row, email)) {
+      if (shouldRemove(row)) {
         rowNumbers.push(i + 2);
         if (row[COL.receiptFileId]) fileIds.push(String(row[COL.receiptFileId]));
       }
     });
 
-    // Delete from the bottom, grouping neighbouring rows into one call.
     let i = rowNumbers.length - 1;
     while (i >= 0) {
       let start = rowNumbers[i];
@@ -423,18 +509,87 @@ function deleteMyData_(email) {
       sheet.deleteRows(start, count);
       i -= count;
     }
-
-    let trashed = 0;
-    fileIds.forEach(function (fileId) {
-      try {
-        DriveApp.getFileById(fileId).setTrashed(true);
-        trashed++;
-      } catch (err) {
-        console.warn('Could not trash receipt ' + fileId + ': ' + err);
-      }
-    });
-    return { deletedRows: rowNumbers.length, deletedReceipts: trashed };
+    return { rows: rowNumbers.length, fileIds: fileIds };
   });
+}
+
+/** Trashes a list of Drive files and returns how many it managed to trash. */
+function trashFiles_(fileIds) {
+  return fileIds.filter(trashFile_).length;
+}
+
+/**
+ * Moves one Drive file to the trash (Drive deletes it for good after 30
+ * days). Does nothing for an empty id. Returns true if it worked.
+ */
+function trashFile_(fileId) {
+  if (!fileId) return false;
+  try {
+    DriveApp.getFileById(fileId).setTrashed(true);
+    return true;
+  } catch (err) {
+    console.warn('Could not trash receipt ' + fileId + ': ' + err);
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Daily limits
+// ---------------------------------------------------------------------------
+
+/**
+ * Throws a LIMIT error if this save would go over a daily limit, for this
+ * user or for everyone together. Counts live in Script Properties as
+ * {day, adds, receipts}: one entry per user (keyed by a hash of their email)
+ * plus one for everyone. A new day simply starts again from zero.
+ */
+function checkLimits_(email, withReceipt) {
+  const mine = readUsage_(userUsageKey_(email));
+  const everyone = readUsage_('usage:all');
+  if (mine.adds >= MAX_ADDS_PER_USER_PER_DAY) {
+    throw new ApiError('LIMIT', "You've reached today's limit of " + MAX_ADDS_PER_USER_PER_DAY +
+      ' entries. Please try again tomorrow.');
+  }
+  if (everyone.adds >= MAX_ADDS_ALL_USERS_PER_DAY) {
+    throw new ApiError('LIMIT', 'The app is very busy today. Please try again tomorrow.');
+  }
+  if (withReceipt && mine.receipts >= MAX_RECEIPTS_PER_USER_PER_DAY) {
+    throw new ApiError('LIMIT', "You've reached today's limit of " + MAX_RECEIPTS_PER_USER_PER_DAY +
+      ' receipt photos. Remove the photo to save this entry.');
+  }
+  if (withReceipt && everyone.receipts >= MAX_RECEIPTS_ALL_USERS_PER_DAY) {
+    throw new ApiError('LIMIT', "The app has reached today's limit for receipt photos. " +
+      'Remove the photo to save this entry.');
+  }
+}
+
+/** Adds one save (and maybe one photo) to today's counts. Call inside the lock. */
+function recordUsage_(email, withReceipt) {
+  const updates = {};
+  [userUsageKey_(email), 'usage:all'].forEach(function (key) {
+    const usage = readUsage_(key);
+    usage.adds++;
+    if (withReceipt) usage.receipts++;
+    updates[key] = JSON.stringify(usage);
+  });
+  PropertiesService.getScriptProperties().setProperties(updates);
+}
+
+/** Today's counts for one key, or zeros if there are none yet for today. */
+function readUsage_(key) {
+  const today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  try {
+    const usage = JSON.parse(PropertiesService.getScriptProperties().getProperty(key));
+    if (usage && usage.day === today) return usage;
+  } catch (err) {
+    // missing or damaged: start from zero
+  }
+  return { day: today, adds: 0, receipts: 0 };
+}
+
+/** The Script Properties key for one user's counts (a hash keeps it short). */
+function userUsageKey_(email) {
+  return 'usage:' + sha256_(email);
 }
 
 // ---------------------------------------------------------------------------
@@ -509,7 +664,7 @@ function decodeReceipt_(receipt, id) {
   }
   const base64 = receipt.data.replace(/^data:image\/jpeg;base64,/, '');
   if (base64.length > Math.ceil(MAX_RECEIPT_BYTES / 3) * 4) {
-    throw new ApiError('BAD_REQUEST', 'Receipt image is too large (max 3 MB).');
+    throw new ApiError('BAD_REQUEST', 'Receipt image is too large (max 2 MB).');
   }
   let bytes;
   try {
