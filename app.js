@@ -23,6 +23,7 @@ const MAX_NOTE_LENGTH = 200;
 const TOKEN_KEY = 'budget.session';            // where the token is kept
 const CACHE_PREFIX = 'budget.expenses.';       // + email, one cache per user
 const EXPIRY_MARGIN_MS = 60 * 1000;            // treat tokens as expired 1 min early
+const REFRESH_BEFORE_MS = 5 * 60 * 1000;       // try to renew the sign-in 5 min before it ends
 const PHOTO_MAX_SIZE = 1280;                   // longest side of a receipt photo, in pixels
 const PHOTO_QUALITY = 0.75;                    // JPEG quality: 0.75 keeps text readable, files ~150 KB
 
@@ -40,6 +41,8 @@ const state = {
   receiptPhoto: null,   // the compressed photo chosen on the Add form, {mimeType, data}
   preparingPhoto: false, // true while a photo is being compressed
   receiptCache: new Map(), // id → image already loaded, so opening it twice is instant
+  refreshTimer: null,   // timer that renews the sign-in shortly before it expires
+  expiryTimer: null,    // timer that asks the user to sign in again if renewing didn't work
   screen: 'add',        // which tab is open
   summaryMonth: null,   // 'yyyy-mm' shown on the Summary screen
 };
@@ -109,12 +112,10 @@ function start() {
     });
   }
 
-  // When the app comes back to the front (e.g. phone unlocked after an hour),
-  // check whether the sign-in has expired.
+  // Phones pause timers while the app is in the background, so when it comes
+  // back to the front (e.g. unlocked after an hour) we check the sign-in again.
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && state.idToken && !isSessionValid(state.user)) {
-      handleExpiredSession();
-    }
+    if (document.visibilityState === 'visible' && state.idToken) scheduleSessionTimers();
   });
 
   initGoogleSignIn();
@@ -123,6 +124,7 @@ function start() {
   if (saved) {
     state.idToken = saved.idToken;
     state.user = saved.user;
+    scheduleSessionTimers();
     showApp();
   } else {
     showSignIn();
@@ -176,10 +178,45 @@ function initGoogleSignIn() {
  */
 function handleCredential(response) {
   const payload = decodeJwtPayload(response.credential);
+  // A quiet renewal (see renewSignIn) for the person already using the app:
+  // just swap in the new token and leave the screen exactly as it is.
+  const isRenewal = Boolean(state.user) && state.user.email === payload.email && !$('app-screen').hidden;
   state.idToken = response.credential;
   state.user = { email: payload.email, name: payload.name, exp: payload.exp };
   saveSession();
-  showApp();
+  scheduleSessionTimers();
+  if (!isRenewal) showApp();
+}
+
+/**
+ * Sets two timers based on when the token expires:
+ *   - 5 minutes before: try to renew the sign-in quietly (renewSignIn);
+ *   - 1 minute before: if it still wasn't renewed, ask the user to sign in.
+ * Called after every sign-in, and whenever the app comes back to the front.
+ */
+function scheduleSessionTimers() {
+  clearTimeout(state.refreshTimer);
+  clearTimeout(state.expiryTimer);
+  if (!state.user) return;
+  const msLeft = state.user.exp * 1000 - Date.now();
+  if (msLeft <= EXPIRY_MARGIN_MS) {
+    handleExpiredSession();
+    return;
+  }
+  state.refreshTimer = setTimeout(renewSignIn, Math.max(0, msLeft - REFRESH_BEFORE_MS));
+  state.expiryTimer = setTimeout(handleExpiredSession, msLeft - EXPIRY_MARGIN_MS);
+}
+
+/**
+ * Asks Google for a fresh token without interrupting the user. Because we
+ * set auto_select: true, Google signs a returning user straight back in
+ * (at most a small "Signing in as…" banner) and calls handleCredential with
+ * the new token. Google may skip this, e.g. after the user dismissed its
+ * prompt, or in browsers that block it; then the expiry timer asks the user
+ * to sign in normally, as before.
+ */
+function renewSignIn() {
+  if (typeof google !== 'undefined' && google.accounts) google.accounts.id.prompt();
 }
 
 /**
@@ -220,6 +257,8 @@ function loadSession() {
  * to sign in again. prompt() shows Google's One Tap to make it quick.
  */
 function handleExpiredSession() {
+  clearTimeout(state.refreshTimer);
+  clearTimeout(state.expiryTimer);
   state.idToken = null;
   localStorage.removeItem(TOKEN_KEY);
   showSignIn('Your sign-in has expired. Please sign in again.');
@@ -249,6 +288,8 @@ function clearUserData() {
   state.expenses = [];
   state.receiptCache.clear();
   clearReceiptPhoto();
+  clearTimeout(state.refreshTimer);
+  clearTimeout(state.expiryTimer);
   if (typeof google !== 'undefined' && google.accounts) google.accounts.id.disableAutoSelect();
 }
 
@@ -465,6 +506,7 @@ async function saveExpense(id) {
   if (!expense) return;
   expense.status = 'saving';
   delete expense.error;
+  delete expense.errorCode;
   renderAll();
 
   try {
@@ -479,6 +521,7 @@ async function saveExpense(id) {
     if (current) {
       current.status = 'failed';
       current.error = err.message;
+      current.errorCode = err.code;
     }
     showToast('Not saved: ' + err.message, true);
   }
@@ -707,7 +750,7 @@ async function compressImage(file) {
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', PHOTO_QUALITY));
     if (!blob) throw new Error('Could not prepare the photo. Try another one.');
-    if (blob.size > 3 * 1024 * 1024) throw new Error('This photo is too large. Try another one.');
+    if (blob.size > 2 * 1024 * 1024) throw new Error('This photo is too large. Try another one.');
     return blob;
   } finally {
     URL.revokeObjectURL(url); // free the memory the link used
@@ -846,6 +889,10 @@ function showApp() {
   renderAll();
   showScreen(state.screen);
   loadExpenses();
+  // Entries that failed only because the sign-in had expired: retry them now.
+  for (const e of state.expenses) {
+    if (e.status === 'failed' && e.errorCode === 'AUTH') saveExpense(e.id);
+  }
 }
 
 /** Shows one screen ('add', 'history', 'summary', 'settings') and highlights its tab. */
