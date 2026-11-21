@@ -51,6 +51,14 @@
           <input id="note" type="text" maxlength="200" placeholder="e.g. Lunch with team"
                  autocomplete="off">
 
+          <!-- accept="image/*" lets phones offer the camera or the photo library. -->
+          <label for="receipt-input">Receipt photo <span class="muted">(optional)</span></label>
+          <input id="receipt-input" type="file" accept="image/*">
+          <div id="receipt-preview" class="receipt-preview" hidden>
+            <img id="receipt-thumb" alt="Receipt preview">
+            <button id="receipt-remove" type="button" class="small-button danger">Remove photo</button>
+          </div>
+
           <p id="form-error" class="field-error" role="alert" hidden></p>
           <button type="submit" class="primary-button">Add expense</button>
         </form>
@@ -90,6 +98,15 @@
           <div id="user-email" class="user-email"></div>
         </div>
         <button id="signout-button" type="button" class="secondary-button">Sign out</button>
+
+        <div class="card danger-zone">
+          <h3>Your data</h3>
+          <p class="muted">
+            Permanently remove all your entries and receipt photos from this
+            app. This can't be undone.
+          </p>
+          <button id="delete-data-button" type="button" class="danger-button">Delete my data</button>
+        </div>
       </section>
     </main>
 
@@ -104,6 +121,35 @@
     <!-- Short pop-up messages such as "Saved". -->
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   </div>
+
+  <!-- Pop-up windows. <dialog> is built into browsers: showModal() opens it
+       on top of the page, and the Escape key closes it. -->
+
+  <!-- Receipt viewer -->
+  <dialog id="receipt-dialog" class="dialog">
+    <p id="receipt-status" class="muted"></p>
+    <img id="receipt-image" class="receipt-image" alt="Receipt photo" hidden>
+    <button id="receipt-close" type="button" class="secondary-button">Close</button>
+  </dialog>
+
+  <!-- "Delete my data" confirmation: the user must type DELETE. -->
+  <dialog id="delete-dialog" class="dialog">
+    <h2>Delete all your data?</h2>
+    <p>
+      This removes every entry and receipt photo you've added. It can't be
+      undone, and you'll be signed out.
+    </p>
+    <div class="form">
+      <label for="delete-confirm-input">Type DELETE to confirm</label>
+      <input id="delete-confirm-input" type="text" autocomplete="off" autocapitalize="characters"
+             spellcheck="false">
+    </div>
+    <p id="delete-error" class="field-error" role="alert" hidden></p>
+    <div class="dialog-buttons">
+      <button id="delete-cancel" type="button" class="secondary-button">Cancel</button>
+      <button id="delete-confirm" type="button" class="danger-button" disabled>Delete all</button>
+    </div>
+  </dialog>
 
 </body>
 </html>

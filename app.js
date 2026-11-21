@@ -23,17 +23,23 @@ const MAX_NOTE_LENGTH = 200;
 const TOKEN_KEY = 'budget.session';            // where the token is kept
 const CACHE_PREFIX = 'budget.expenses.';       // + email, one cache per user
 const EXPIRY_MARGIN_MS = 60 * 1000;            // treat tokens as expired 1 min early
+const PHOTO_MAX_SIZE = 1280;                   // longest side of a receipt photo, in pixels
+const PHOTO_QUALITY = 0.75;                    // JPEG quality: 0.75 keeps text readable, files ~150 KB
 
 // Everything the app currently knows, in one place.
 const state = {
   idToken: null,        // the raw Google ID token, sent to the script
   user: null,           // {email, name, exp} read from the token, for display only
   // The user's entries, newest first. Each is
-  // {id, date, amount, category, note, hasReceipt, createdAt, status?, error?}
+  // {id, date, amount, category, note, hasReceipt, createdAt, status?, error?, receipt?}
   // where status is only set on entries not yet on the server:
-  // 'saving' (request in progress) or 'failed' (needs a retry).
+  // 'saving' (request in progress) or 'failed' (needs a retry),
+  // and receipt ({mimeType, data}) is the photo waiting to be uploaded.
   expenses: [],
   deleting: new Set(),  // ids being deleted right now (so a refresh won't bring them back)
+  receiptPhoto: null,   // the compressed photo chosen on the Add form, {mimeType, data}
+  preparingPhoto: false, // true while a photo is being compressed
+  receiptCache: new Map(), // id → image already loaded, so opening it twice is instant
   screen: 'add',        // which tab is open
   summaryMonth: null,   // 'yyyy-mm' shown on the Summary screen
 };
@@ -75,6 +81,31 @@ function start() {
   // One listener for every Delete/Retry button in History ("event delegation"):
   // the list is redrawn often, so this is simpler than a listener per button.
   $('history-list').addEventListener('click', handleHistoryClick);
+
+  // Receipts.
+  $('receipt-input').addEventListener('change', handleReceiptChosen);
+  $('receipt-remove').addEventListener('click', clearReceiptPhoto);
+  $('receipt-close').addEventListener('click', () => $('receipt-dialog').close());
+
+  // Delete my data.
+  $('delete-data-button').addEventListener('click', openDeleteDialog);
+  $('delete-cancel').addEventListener('click', () => $('delete-dialog').close());
+  $('delete-confirm').addEventListener('click', deleteMyData);
+  $('delete-confirm-input').addEventListener('input', () => {
+    $('delete-confirm').disabled = $('delete-confirm-input').value.trim().toUpperCase() !== 'DELETE';
+  });
+
+  // Tapping the dark area around a pop-up closes it, like most apps.
+  // A tap on the backdrop is reported as a tap on the <dialog> itself, so we
+  // check whether it landed outside the dialog's box.
+  for (const dialog of document.querySelectorAll('dialog')) {
+    dialog.addEventListener('click', (event) => {
+      const box = dialog.getBoundingClientRect();
+      const outside = event.clientX < box.left || event.clientX > box.right ||
+                      event.clientY < box.top || event.clientY > box.bottom;
+      if (event.target === dialog && outside) dialog.close();
+    });
+  }
 
   // When the app comes back to the front (e.g. phone unlocked after an hour),
   // check whether the sign-in has expired.
@@ -191,13 +222,20 @@ function signOut() {
   if (unsaved && !confirm(unsaved + ' entries are not saved yet and will be lost. Sign out anyway?')) {
     return;
   }
+  clearUserData();
+  showSignIn();
+}
+
+/** Forgets everything about the current user on this device. */
+function clearUserData() {
   if (state.user) localStorage.removeItem(CACHE_PREFIX + state.user.email);
   localStorage.removeItem(TOKEN_KEY);
   state.idToken = null;
   state.user = null;
   state.expenses = [];
+  state.receiptCache.clear();
+  clearReceiptPhoto();
   if (typeof google !== 'undefined' && google.accounts) google.accounts.id.disableAutoSelect();
-  showSignIn();
 }
 
 // ---------------------------------------------------------------------------
@@ -269,9 +307,18 @@ async function loadExpenses() {
   }
 }
 
-/** Saves this user's rows in localStorage, under a key with their email. */
+/**
+ * Saves this user's rows in localStorage, under a key with their email.
+ * Unsaved entries include their photo, so a retry still has it after the app
+ * is closed. localStorage holds about 5 MB, so if it is full we just skip
+ * caching: the app still works, it only loads a little slower next time.
+ */
 function saveCache() {
-  localStorage.setItem(CACHE_PREFIX + state.user.email, JSON.stringify(state.expenses));
+  try {
+    localStorage.setItem(CACHE_PREFIX + state.user.email, JSON.stringify(state.expenses));
+  } catch (err) {
+    console.warn('Could not cache entries:', err);
+  }
 }
 
 /**
@@ -329,7 +376,14 @@ function resetAddForm() {
   $('amount').value = '';
   $('note').value = '';
   if (!$('date').value) $('date').value = today();
+  clearReceiptPhoto();
   $('form-error').hidden = true;
+}
+
+/** Shows a red message under the Add form. */
+function showFormError(message) {
+  $('form-error').textContent = message;
+  $('form-error').hidden = false;
 }
 
 /**
@@ -364,20 +418,18 @@ function readAddForm() {
  */
 function handleAddSubmit(event) {
   event.preventDefault(); // stop the browser reloading the page
+  if (state.preparingPhoto) return showFormError('Wait a moment, the photo is still being prepared.');
   const { expense: values, error } = readAddForm();
-  if (error) {
-    $('form-error').textContent = error;
-    $('form-error').hidden = false;
-    return;
-  }
+  if (error) return showFormError(error);
 
   const expense = {
     ...values,
     id: makeId(),
-    hasReceipt: false,
+    hasReceipt: Boolean(state.receiptPhoto),
     createdAt: new Date().toISOString(),
     status: 'saving',
   };
+  if (state.receiptPhoto) expense.receipt = state.receiptPhoto;
   state.expenses.push(expense);
   sortExpenses();
   saveCache();
@@ -402,8 +454,10 @@ async function saveExpense(id) {
   renderAll();
 
   try {
-    const { id: expenseId, date, amount, category, note } = expense;
-    const result = await callApi('add', { expense: { id: expenseId, date, amount, category, note } });
+    const { id: expenseId, date, amount, category, note, receipt } = expense;
+    const result = await callApi('add', { expense: { id: expenseId, date, amount, category, note, receipt } });
+    // Keep the photo we already have, so viewing it needs no download.
+    if (receipt) state.receiptCache.set(id, 'data:image/jpeg;base64,' + receipt.data);
     const index = state.expenses.findIndex((e) => e.id === id);
     if (index !== -1) state.expenses[index] = result.expense;
   } catch (err) {
@@ -429,6 +483,7 @@ function handleHistoryClick(event) {
   if (!button) return;
   if (button.dataset.action === 'delete') deleteExpense(button.dataset.id);
   if (button.dataset.action === 'retry') saveExpense(button.dataset.id);
+  if (button.dataset.action === 'receipt') viewReceipt(button.dataset.id);
 }
 
 /**
@@ -508,6 +563,9 @@ function renderExpenseItem(expense) {
 
   const side = createElement('div', 'expense-side');
   side.append(createElement('div', 'expense-amount', money.format(expense.amount)));
+  if (expense.hasReceipt) {
+    side.append(createButton('Receipt', 'receipt', expense.id, 'small-button'));
+  }
   if (expense.status === 'failed') {
     side.append(createButton('Retry', 'retry', expense.id, 'small-button'));
   }
@@ -544,7 +602,7 @@ function renderSummary() {
   }
 
   $('month-total').textContent = money.format(totalSen / 100);
-  $('month-count').textContent = entries.length + (entries.length === 1 ? ' entry' : ' entries');
+  $('month-count').textContent = plural(entries.length, 'entry', 'entries');
 
   const list = $('category-totals');
   list.replaceChildren();
@@ -572,11 +630,187 @@ function changeMonth(delta) {
 }
 
 // ---------------------------------------------------------------------------
+// Receipts
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs when the user picks or takes a photo on the Add form. Phone photos
+ * are often 3–8 MB, so we shrink it first (see compressImage) and keep the
+ * result until the entry is added. The Add button waits while this runs.
+ */
+async function handleReceiptChosen() {
+  const file = $('receipt-input').files[0];
+  state.receiptPhoto = null;
+  $('receipt-preview').hidden = true;
+  $('form-error').hidden = true;
+  if (!file) return;
+
+  state.preparingPhoto = true;
+  const button = $('add-form').querySelector('.primary-button');
+  button.disabled = true;
+  button.textContent = 'Preparing photo…';
+  try {
+    const blob = await compressImage(file);
+    const data = await blobToBase64(blob);
+    state.receiptPhoto = { mimeType: 'image/jpeg', data };
+    $('receipt-thumb').src = 'data:image/jpeg;base64,' + data;
+    $('receipt-preview').hidden = false;
+  } catch (err) {
+    $('receipt-input').value = '';
+    showFormError(err.message);
+  } finally {
+    state.preparingPhoto = false;
+    button.disabled = false;
+    button.textContent = 'Add expense';
+  }
+}
+
+/** Removes the chosen photo from the Add form. */
+function clearReceiptPhoto() {
+  state.receiptPhoto = null;
+  $('receipt-input').value = '';
+  $('receipt-preview').hidden = true;
+  $('receipt-thumb').removeAttribute('src');
+}
+
+/**
+ * Shrinks a photo so its longest side is at most PHOTO_MAX_SIZE pixels and
+ * saves it as a JPEG. How: load the file into an <img>, draw it smaller on a
+ * <canvas>, then ask the canvas for a JPEG. Modern browsers rotate phone
+ * photos the right way up when drawing them, so receipts aren't sideways.
+ */
+async function compressImage(file) {
+  const url = URL.createObjectURL(file); // a temporary link to the file
+  try {
+    const img = await loadImage(url);
+    const scale = Math.min(1, PHOTO_MAX_SIZE / Math.max(img.naturalWidth, img.naturalHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(img.naturalWidth * scale);
+    canvas.height = Math.round(img.naturalHeight * scale);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff'; // JPEG has no transparency: use white, not black
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', PHOTO_QUALITY));
+    if (!blob) throw new Error('Could not prepare the photo. Try another one.');
+    if (blob.size > 3 * 1024 * 1024) throw new Error('This photo is too large. Try another one.');
+    return blob;
+  } finally {
+    URL.revokeObjectURL(url); // free the memory the link used
+  }
+}
+
+/** Loads an image from a URL and waits until it is ready to draw. */
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('This file is not a photo the browser can open.'));
+    img.src = url;
+  });
+}
+
+/**
+ * Turns a file (blob) into base64 text, which can travel inside JSON.
+ * readAsDataURL gives "data:image/jpeg;base64,AAAA…"; we keep the part after the comma.
+ */
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1]);
+    reader.onerror = () => reject(new Error('Could not read the photo.'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/**
+ * Opens the receipt viewer for one entry. The photo comes from, in order:
+ * the entry itself (not uploaded yet), the in-memory cache, or the server.
+ * The server only returns it to the entry's owner.
+ */
+async function viewReceipt(id) {
+  const expense = findExpense(id);
+  if (!expense) return;
+  const dialog = $('receipt-dialog');
+  const img = $('receipt-image');
+  const status = $('receipt-status');
+  dialog.dataset.id = id;
+  img.hidden = true;
+  img.removeAttribute('src');
+  status.textContent = 'Loading receipt…';
+  status.hidden = false;
+  dialog.showModal();
+
+  try {
+    let src = state.receiptCache.get(id);
+    if (expense.receipt) {
+      src = 'data:image/jpeg;base64,' + expense.receipt.data;
+    } else if (!src) {
+      const result = await callApi('getReceipt', { id });
+      src = 'data:image/jpeg;base64,' + result.data;
+      state.receiptCache.set(id, src);
+    }
+    // The user may have closed the viewer, or opened another receipt, meanwhile.
+    if (!dialog.open || dialog.dataset.id !== id) return;
+    img.src = src;
+    img.hidden = false;
+    status.hidden = true;
+  } catch (err) {
+    if (dialog.dataset.id === id) status.textContent = 'Could not load the receipt: ' + err.message;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Delete my data
+// ---------------------------------------------------------------------------
+
+/** Opens the "Delete my data" confirmation, empty and with the button off. */
+function openDeleteDialog() {
+  $('delete-confirm-input').value = '';
+  $('delete-confirm').disabled = true;
+  $('delete-confirm').textContent = 'Delete all';
+  $('delete-error').hidden = true;
+  $('delete-dialog').showModal();
+  $('delete-confirm-input').focus();
+}
+
+/**
+ * Asks the server to remove all of the user's rows and receipt files, then
+ * clears this device and signs out. Waits for saves in progress first:
+ * otherwise a save could land just after the delete and leave a row behind.
+ */
+async function deleteMyData() {
+  const errorBox = $('delete-error');
+  const button = $('delete-confirm');
+  if (state.expenses.some((e) => e.status === 'saving')) {
+    errorBox.textContent = 'Some entries are still saving. Wait a few seconds and try again.';
+    errorBox.hidden = false;
+    return;
+  }
+
+  button.disabled = true;
+  button.textContent = 'Deleting…';
+  errorBox.hidden = true;
+  try {
+    const result = await callApi('deleteMyData');
+    clearUserData();
+    showSignIn('Your data was deleted: ' + plural(result.deletedRows, 'entry', 'entries') +
+               ' and ' + plural(result.deletedReceipts, 'receipt photo', 'receipt photos') + '.');
+  } catch (err) {
+    errorBox.textContent = 'Could not delete your data: ' + err.message;
+    errorBox.hidden = false;
+    button.disabled = false;
+    button.textContent = 'Delete all';
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Screens, messages and small helpers
 // ---------------------------------------------------------------------------
 
 /** Shows the sign-in screen, optionally with a message (red if isError). */
 function showSignIn(message = '', isError = false) {
+  for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
   $('app-screen').hidden = true;
   $('signin-screen').hidden = false;
   const box = $('signin-message');
@@ -657,6 +891,11 @@ function makeId() {
   if (crypto.randomUUID) return crypto.randomUUID();
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** plural(1, 'entry', 'entries') → "1 entry"; plural(3, ...) → "3 entries". */
+function plural(count, one, many) {
+  return count + ' ' + (count === 1 ? one : many);
 }
 
 /** "5" → "05", for building dates. */
