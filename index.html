@@ -4,7 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Budget Tracker</title>
+  <meta name="description" content="Track your daily spending in RM.">
   <link rel="stylesheet" href="style.css">
+
+  <!-- Installable app: name, icons and colours for phones. -->
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-title" content="Budget">
+  <meta name="theme-color" content="#1a7f5a" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1f2226" media="(prefers-color-scheme: dark)">
   <!-- "defer" runs the scripts in this order after the page is parsed:
        Google's sign-in library first, then our settings, then our app. -->
   <script src="https://accounts.google.com/gsi/client" defer></script>
@@ -24,6 +33,7 @@
       developer's Google Sheet and your receipts in the developer's Google
       Drive. Only you can see your data in the app. You can delete all of it
       at any time from Settings.
+      <a href="privacy.html">Privacy policy</a>
     </p>
   </main>
 
@@ -107,6 +117,7 @@
           </p>
           <button id="delete-data-button" type="button" class="danger-button">Delete my data</button>
         </div>
+        <p class="muted small"><a href="privacy.html">Privacy policy</a></p>
       </section>
     </main>
 

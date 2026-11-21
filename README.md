@@ -16,6 +16,10 @@ receipts in Google Drive, with an Apps Script backend. Running cost: RM0.
 | `style.css` | The look |
 | `app.js` | The logic: sign-in, talking to the script, saving entries, drawing the screens |
 | `config.js` | Your Client ID and Script URL. The only file you edit |
+| `manifest.json` | Tells phones the app's name, icon and colours, so it can be installed |
+| `sw.js` | The service worker: keeps a copy of the app's files so it opens offline |
+| `privacy.html` | The privacy policy (Google requires it before publishing sign-in) |
+| `icons/` | App icons: 192px, 512px, a "maskable" 512px for Android, and 180px for iPhone |
 
 ## Run it locally
 

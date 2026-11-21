@@ -60,6 +60,8 @@ const money = new Intl.NumberFormat('en-MY', { style: 'currency', currency: 'MYR
  * doesn't force a new sign-in).
  */
 function start() {
+  registerServiceWorker();
+
   if (CLIENT_ID.startsWith('PASTE_') || SCRIPT_URL.startsWith('PASTE_')) {
     showSignIn('Setup needed: put your Client ID and Script URL in config.js.', true);
     return;
@@ -125,6 +127,18 @@ function start() {
   } else {
     showSignIn();
   }
+}
+
+/**
+ * Registers sw.js, which keeps a copy of the app's files so the app opens
+ * even offline, and is one of the things that makes it installable.
+ * Older browsers without service workers simply skip this.
+ */
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.register('sw.js').catch((err) => {
+    console.warn('Service worker not registered:', err);
+  });
 }
 
 /**

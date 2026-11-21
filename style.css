@@ -289,3 +289,12 @@ button:disabled { cursor: default; opacity: 0.4; }
   color: #fff;
   border: none;
 }
+
+/* ---------- Links and the privacy page ---------- */
+
+a { color: var(--accent); }
+.small { font-size: 0.85rem; }
+.page { max-width: 680px; margin: 0 auto; padding: 16px 16px 48px; }
+.page h1 { margin-top: 16px; }
+.page h2 { margin: 28px 0 8px; font-size: 1.15rem; }
+.page li { margin-bottom: 8px; }
