@@ -12,9 +12,9 @@ receipts in Google Drive, with an Apps Script backend. Running cost: RM0.
 | File | What it's for |
 | --- | --- |
 | `Code.gs` | The backend. Paste it into Apps Script (it isn't served by GitHub Pages) |
-| `index.html` | The page: sign-in and the app screens |
+| `index.html` | The page: sign-in, then the Add, History, Summary and Settings screens |
 | `style.css` | The look |
-| `app.js` | The logic: sign-in, talking to the script, drawing the list |
+| `app.js` | The logic: sign-in, talking to the script, saving entries, drawing the screens |
 | `config.js` | Your Client ID and Script URL. The only file you edit |
 
 ## Run it locally

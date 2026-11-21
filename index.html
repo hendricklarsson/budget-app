@@ -14,7 +14,7 @@
 <body>
 
   <!-- Sign-in screen: shown when nobody is signed in. -->
-  <main id="signin-screen" class="screen" hidden>
+  <main id="signin-screen" class="signin" hidden>
     <h1>Budget Tracker</h1>
     <p class="tagline">Track your daily spending in RM.</p>
     <p id="signin-message" class="message" hidden></p>
@@ -27,23 +27,83 @@
     </p>
   </main>
 
-  <!-- Main app: shown after sign-in. Later phases add Add / Summary / Settings. -->
-  <main id="app-screen" class="screen" hidden>
-    <header class="topbar">
-      <span id="user-email" class="user-email"></span>
-      <button id="signout-button" type="button" class="link-button">Sign out</button>
-    </header>
-
-    <section>
-      <div class="section-head">
-        <h2>Your entries</h2>
-        <button id="refresh-button" type="button" class="link-button">Refresh</button>
-      </div>
+  <!-- The app itself: shown after sign-in. One <section> per screen;
+       app.js shows one at a time when a tab at the bottom is tapped. -->
+  <div id="app-screen" class="app" hidden>
+    <main class="content">
       <p id="status" class="message" hidden></p>
-      <ul id="expense-list" class="expense-list"></ul>
-      <p id="empty-list" class="muted" hidden>No entries yet.</p>
-    </section>
-  </main>
+
+      <!-- Add -->
+      <section id="screen-add" class="view">
+        <h2>Add expense</h2>
+        <form id="add-form" class="form" novalidate>
+          <label for="amount">Amount (RM)</label>
+          <input id="amount" type="number" inputmode="decimal" step="0.01" min="0.01"
+                 max="1000000" placeholder="0.00" autocomplete="off" required>
+
+          <label for="category">Category</label>
+          <select id="category" required></select>
+
+          <label for="date">Date</label>
+          <input id="date" type="date" required>
+
+          <label for="note">Note <span class="muted">(optional)</span></label>
+          <input id="note" type="text" maxlength="200" placeholder="e.g. Lunch with team"
+                 autocomplete="off">
+
+          <p id="form-error" class="field-error" role="alert" hidden></p>
+          <button type="submit" class="primary-button">Add expense</button>
+        </form>
+      </section>
+
+      <!-- History -->
+      <section id="screen-history" class="view" hidden>
+        <div class="section-head">
+          <h2>History</h2>
+          <button id="refresh-button" type="button" class="link-button">Refresh</button>
+        </div>
+        <div id="history-list"></div>
+        <p id="empty-list" class="muted" hidden>No entries yet. Add your first expense.</p>
+      </section>
+
+      <!-- Summary -->
+      <section id="screen-summary" class="view" hidden>
+        <h2>Summary</h2>
+        <div class="month-picker">
+          <button id="prev-month" type="button" class="icon-button" aria-label="Previous month">‹</button>
+          <span id="month-label" class="month-label"></span>
+          <button id="next-month" type="button" class="icon-button" aria-label="Next month">›</button>
+        </div>
+        <div class="card total-card">
+          <div class="muted">Total spent</div>
+          <div id="month-total" class="total-amount"></div>
+          <div id="month-count" class="muted"></div>
+        </div>
+        <ul id="category-totals" class="category-totals"></ul>
+      </section>
+
+      <!-- Settings -->
+      <section id="screen-settings" class="view" hidden>
+        <h2>Settings</h2>
+        <div class="card">
+          <div class="muted">Signed in as</div>
+          <div id="user-email" class="user-email"></div>
+        </div>
+        <button id="signout-button" type="button" class="secondary-button">Sign out</button>
+      </section>
+    </main>
+
+    <!-- Tabs at the bottom, like a phone app. -->
+    <nav class="tabbar" aria-label="Screens">
+      <button type="button" data-screen="add">Add</button>
+      <button type="button" data-screen="history">History</button>
+      <button type="button" data-screen="summary">Summary</button>
+      <button type="button" data-screen="settings">Settings</button>
+    </nav>
+
+    <!-- Short pop-up messages such as "Saved". -->
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  </div>
 
 </body>
 </html>

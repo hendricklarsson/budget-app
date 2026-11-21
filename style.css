@@ -8,8 +8,11 @@
   --muted: #69707a;
   --line: #e3e6ea;
   --accent: #1a7f5a;
+  --accent-text: #ffffff;
   --danger: #c0392b;
+  --warning: #9a6700;
   --radius: 12px;
+  --tabbar-height: 60px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -20,7 +23,9 @@
     --muted: #9aa1ab;
     --line: #30343a;
     --accent: #4cc596;
+    --accent-text: #0d2a1f;
     --danger: #ff7b6e;
+    --warning: #e3b341;
   }
 }
 
@@ -33,22 +38,35 @@ body {
   font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
-/* One centred column, comfortable on phones and desktops. */
-.screen {
-  max-width: 560px;
-  margin: 0 auto;
-  padding: 16px;
-}
-
 /* The HTML "hidden" attribute must win over any display rule. */
 [hidden] { display: none !important; }
 
 h1 { margin: 48px 0 4px; font-size: 1.8rem; }
-h2 { margin: 0; font-size: 1.15rem; }
+h2 { margin: 0 0 16px; font-size: 1.3rem; }
+.muted, .tagline { color: var(--muted); }
 
-.tagline, .muted { color: var(--muted); }
+/* ---------- Sign-in ---------- */
+
+.signin { max-width: 560px; margin: 0 auto; padding: 16px; }
 .google-button { margin: 24px 0; min-height: 44px; }
 .privacy { font-size: 0.85rem; color: var(--muted); }
+
+/* ---------- Layout ---------- */
+
+/* One centred column; bottom padding keeps content clear of the tab bar. */
+.content {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 20px 16px calc(var(--tabbar-height) + 32px + env(safe-area-inset-bottom));
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
 
 .message {
   padding: 10px 12px;
@@ -58,34 +76,76 @@ h2 { margin: 0; font-size: 1.15rem; }
 }
 .message.error { border-color: var(--danger); color: var(--danger); }
 
-.topbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  padding-bottom: 12px;
-  margin-bottom: 16px;
-  border-bottom: 1px solid var(--line);
-}
-.user-email { color: var(--muted); font-size: 0.9rem; overflow-wrap: anywhere; }
-
 .section-head {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
+  align-items: baseline;
 }
 
-.link-button {
+/* ---------- Buttons ---------- */
+
+button { font: inherit; cursor: pointer; }
+button:disabled { cursor: default; opacity: 0.4; }
+
+.primary-button, .secondary-button {
+  width: 100%;
+  min-height: 48px;
+  border-radius: var(--radius);
+  font-weight: 600;
+}
+.primary-button { background: var(--accent); color: var(--accent-text); border: none; }
+.secondary-button { background: var(--card); color: var(--text); border: 1px solid var(--line); }
+
+.link-button, .small-button {
   background: none;
   border: none;
   color: var(--accent);
-  font: inherit;
-  cursor: pointer;
   padding: 8px 4px;
 }
+.small-button { font-size: 0.85rem; padding: 4px 6px; }
+.small-button.danger { color: var(--danger); }
 
-/* Entry list */
+.icon-button {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--text);
+  font-size: 1.4rem;
+  line-height: 1;
+}
+
+/* ---------- Add form ---------- */
+
+.form { display: flex; flex-direction: column; }
+.form label { font-weight: 600; margin: 14px 0 6px; font-size: 0.95rem; }
+.form label:first-child { margin-top: 0; }
+.form input, .form select {
+  width: 100%;
+  min-height: 48px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--text);
+  font: inherit;
+}
+.form #amount { font-size: 1.5rem; font-weight: 600; }
+.form input:focus, .form select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.form .primary-button { margin-top: 24px; }
+.field-error { color: var(--danger); margin: 12px 0 0; }
+
+/* ---------- History ---------- */
+
+.day-heading {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 20px 0 8px;
+}
+.day-heading:first-child { margin-top: 0; }
+
 .expense-list { list-style: none; margin: 0; padding: 0; }
 .expense {
   display: flex;
@@ -97,7 +157,81 @@ h2 { margin: 0; font-size: 1.15rem; }
   border: 1px solid var(--line);
   border-radius: var(--radius);
 }
+.expense.is-saving { opacity: 0.7; }
+.expense.is-failed { border-color: var(--danger); }
 .expense-main { min-width: 0; }
 .expense-category { font-weight: 600; }
 .expense-meta { color: var(--muted); font-size: 0.85rem; overflow-wrap: anywhere; }
+.expense-meta.saving { color: var(--warning); }
+.expense-meta.failed { color: var(--danger); }
+.expense-side { text-align: right; flex-shrink: 0; }
 .expense-amount { font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* ---------- Summary ---------- */
+
+.month-picker {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.month-label { font-weight: 600; font-size: 1.1rem; }
+.total-amount { font-size: 2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+.category-totals { list-style: none; margin: 0; padding: 0; }
+.category-totals li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 4px;
+  border-bottom: 1px solid var(--line);
+}
+.category-totals .amount { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.category-totals .percent { color: var(--muted); margin-left: 8px; font-size: 0.85rem; }
+
+/* ---------- Settings ---------- */
+
+.user-email { overflow-wrap: anywhere; }
+
+/* ---------- Tab bar ---------- */
+
+.tabbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  background: var(--card);
+  border-top: 1px solid var(--line);
+  padding-bottom: env(safe-area-inset-bottom); /* iPhone home bar */
+}
+.tabbar button {
+  flex: 1;
+  height: var(--tabbar-height);
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.tabbar button[aria-current="page"] {
+  color: var(--accent);
+  box-shadow: inset 0 3px 0 var(--accent);
+}
+
+/* ---------- Toast ---------- */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--tabbar-height) + 16px + env(safe-area-inset-bottom));
+  max-width: calc(100% - 32px);
+  padding: 10px 16px;
+  border-radius: var(--radius);
+  background: var(--text);
+  color: var(--bg);
+  font-size: 0.95rem;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+.toast.error { background: var(--danger); color: #fff; }

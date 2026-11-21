@@ -1,27 +1,42 @@
-// app.js — the app's logic: sign-in, talking to the script, drawing the list.
+// app.js — the app's logic: sign-in, talking to the script, drawing screens.
 //
 // Big picture:
 //   1. Google Sign-In gives us an "ID token" (a signed text that says who the
 //      user is). We keep it and send it with every request.
 //   2. callApi() POSTs {action, idToken, ...} to the Apps Script URL.
-//   3. The user's rows are cached in localStorage, so the list shows instantly
-//      and is then refreshed in the background.
+//   3. The user's rows live in state.expenses and are cached in localStorage,
+//      so screens draw instantly; the server is refreshed in the background.
+//   4. New entries appear at once ("optimistic" update) and save in the
+//      background. If a save fails, the entry is marked so the user can retry.
 
 'use strict';
 
 // ---------------------------------------------------------------------------
-// State: everything the app currently knows, in one place.
+// Settings and state
 // ---------------------------------------------------------------------------
 
-const state = {
-  idToken: null,   // the raw Google ID token, sent to the script
-  user: null,      // {email, name, exp} read from the token, for display only
-  expenses: [],    // the user's rows, newest first
-};
+// Must match the list in Code.gs, which re-checks every value.
+const CATEGORIES = ['Food', 'Transport', 'Bills', 'Shopping', 'Health', 'Entertainment', 'Other'];
+const MAX_AMOUNT = 1000000;
+const MAX_NOTE_LENGTH = 200;
 
 const TOKEN_KEY = 'budget.session';            // where the token is kept
 const CACHE_PREFIX = 'budget.expenses.';       // + email, one cache per user
 const EXPIRY_MARGIN_MS = 60 * 1000;            // treat tokens as expired 1 min early
+
+// Everything the app currently knows, in one place.
+const state = {
+  idToken: null,        // the raw Google ID token, sent to the script
+  user: null,           // {email, name, exp} read from the token, for display only
+  // The user's entries, newest first. Each is
+  // {id, date, amount, category, note, hasReceipt, createdAt, status?, error?}
+  // where status is only set on entries not yet on the server:
+  // 'saving' (request in progress) or 'failed' (needs a retry).
+  expenses: [],
+  deleting: new Set(),  // ids being deleted right now (so a refresh won't bring them back)
+  screen: 'add',        // which tab is open
+  summaryMonth: null,   // 'yyyy-mm' shown on the Summary screen
+};
 
 // Shortcut for document.getElementById.
 const $ = (id) => document.getElementById(id);
@@ -34,9 +49,9 @@ const money = new Intl.NumberFormat('en-MY', { style: 'currency', currency: 'MYR
 // ---------------------------------------------------------------------------
 
 /**
- * Runs once when the page loads. Restores a saved sign-in if it is still
- * valid (so a reload doesn't force a new sign-in), sets up Google's button,
- * and wires up the buttons.
+ * Runs once when the page loads: wires up every button, sets up Google's
+ * sign-in, and restores a saved sign-in if it is still valid (so a reload
+ * doesn't force a new sign-in).
  */
 function start() {
   if (CLIENT_ID.startsWith('PASTE_') || SCRIPT_URL.startsWith('PASTE_')) {
@@ -44,8 +59,30 @@ function start() {
     return;
   }
 
-  $('signout-button').addEventListener('click', signOut);
+  state.summaryMonth = currentMonth();
+  fillCategoryOptions();
+  resetAddForm();
+
+  // Buttons and forms.
+  $('add-form').addEventListener('submit', handleAddSubmit);
   $('refresh-button').addEventListener('click', () => loadExpenses());
+  $('signout-button').addEventListener('click', signOut);
+  $('prev-month').addEventListener('click', () => changeMonth(-1));
+  $('next-month').addEventListener('click', () => changeMonth(1));
+  for (const tab of document.querySelectorAll('.tabbar button')) {
+    tab.addEventListener('click', () => showScreen(tab.dataset.screen));
+  }
+  // One listener for every Delete/Retry button in History ("event delegation"):
+  // the list is redrawn often, so this is simpler than a listener per button.
+  $('history-list').addEventListener('click', handleHistoryClick);
+
+  // When the app comes back to the front (e.g. phone unlocked after an hour),
+  // check whether the sign-in has expired.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && state.idToken && !isSessionValid(state.user)) {
+      handleExpiredSession();
+    }
+  });
 
   initGoogleSignIn();
 
@@ -150,6 +187,10 @@ function handleExpiredSession() {
  * disableAutoSelect() stops Google from signing the same user straight back in.
  */
 function signOut() {
+  const unsaved = state.expenses.filter((e) => e.status).length;
+  if (unsaved && !confirm(unsaved + ' entries are not saved yet and will be lost. Sign out anyway?')) {
+    return;
+  }
   if (state.user) localStorage.removeItem(CACHE_PREFIX + state.user.email);
   localStorage.removeItem(TOKEN_KEY);
   state.idToken = null;
@@ -186,7 +227,7 @@ async function callApi(action, data = {}) {
       body: JSON.stringify({ action, idToken: state.idToken, ...data }),
     });
   } catch (err) {
-    throw Object.assign(new Error('No connection to the server. Check your internet.'), { code: 'NETWORK' });
+    throw Object.assign(new Error('No connection to the server.'), { code: 'NETWORK' });
   }
   if (!response.ok) {
     throw Object.assign(new Error('Server error (' + response.status + ').'), { code: 'NETWORK' });
@@ -201,23 +242,30 @@ async function callApi(action, data = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Expenses: load, cache, draw
+// Loading and caching entries
 // ---------------------------------------------------------------------------
 
 /**
- * Fetches the user's rows from the script, saves them to the cache and
- * redraws. The cached list is already on screen, so this feels instant.
+ * Fetches the user's rows from the script, then redraws.
+ * Entries that are not on the server yet (still saving, or failed) are kept,
+ * and entries being deleted are left out, so a refresh never undoes the
+ * user's most recent actions.
  */
 async function loadExpenses() {
-  setStatus(state.expenses.length ? '' : 'Loading…');
+  if (!state.expenses.length) setStatus('Loading…');
   try {
     const result = await callApi('list');
-    state.expenses = result.expenses;
+    const serverIds = new Set(result.expenses.map((e) => e.id));
+    const notOnServerYet = state.expenses.filter((e) => e.status && !serverIds.has(e.id));
+    state.expenses = result.expenses
+      .filter((e) => !state.deleting.has(e.id))
+      .concat(notOnServerYet);
+    sortExpenses();
     saveCache();
-    renderExpenses();
+    renderAll();
     setStatus('');
   } catch (err) {
-    if (err.code !== 'AUTH') setStatus(err.message, true);
+    if (err.code !== 'AUTH') setStatus('Could not refresh: ' + err.message, true);
   }
 }
 
@@ -226,49 +274,305 @@ function saveCache() {
   localStorage.setItem(CACHE_PREFIX + state.user.email, JSON.stringify(state.expenses));
 }
 
-/** Loads this user's cached rows, or an empty list if there are none. */
+/**
+ * Loads this user's cached rows. An entry cached as "saving" was cut off
+ * (the app was closed mid-save), so it becomes "failed" for the user to retry.
+ */
 function loadCache() {
   try {
-    return JSON.parse(localStorage.getItem(CACHE_PREFIX + state.user.email)) || [];
+    const cached = JSON.parse(localStorage.getItem(CACHE_PREFIX + state.user.email)) || [];
+    for (const e of cached) {
+      if (e.status === 'saving') {
+        e.status = 'failed';
+        e.error = 'The app closed before it saved.';
+      }
+    }
+    return cached;
   } catch (err) {
     return [];
   }
 }
 
+/** Newest date first; on the same day, the most recently added first. */
+function sortExpenses() {
+  state.expenses.sort((a, b) => {
+    if (a.date !== b.date) return a.date < b.date ? 1 : -1;
+    return a.createdAt < b.createdAt ? 1 : -1;
+  });
+}
+
+/** Finds an entry by id, or undefined. */
+function findExpense(id) {
+  return state.expenses.find((e) => e.id === id);
+}
+
+// ---------------------------------------------------------------------------
+// Add screen
+// ---------------------------------------------------------------------------
+
+/** Fills the Category drop-down from CATEGORIES. */
+function fillCategoryOptions() {
+  const select = $('category');
+  for (const name of CATEGORIES) {
+    const option = document.createElement('option');
+    option.value = name;
+    option.textContent = name;
+    select.append(option);
+  }
+}
+
 /**
- * Draws the list of entries. Uses textContent (never innerHTML) for user
- * text, so a note like "<script>" is shown as text, not run as code.
+ * Clears amount and note after an add. Date and category are kept on purpose:
+ * people often add several things from the same day or shop in a row.
  */
-function renderExpenses() {
-  const list = $('expense-list');
-  list.replaceChildren();
+function resetAddForm() {
+  $('amount').value = '';
+  $('note').value = '';
+  if (!$('date').value) $('date').value = today();
+  $('form-error').hidden = true;
+}
+
+/**
+ * Reads and checks the Add form. Returns {expense} or {error}.
+ * The server checks everything again; checking here just gives instant
+ * feedback without a 2-second round trip.
+ */
+function readAddForm() {
+  const amountText = $('amount').value.trim();
+  const amount = Math.round(Number(amountText) * 100) / 100;
+  if (!amountText || !Number.isFinite(amount) || amount <= 0) {
+    return { error: 'Enter an amount above RM 0.' };
+  }
+  if (amount > MAX_AMOUNT) return { error: 'The amount can be at most RM 1,000,000.' };
+
+  const category = $('category').value;
+  if (!CATEGORIES.includes(category)) return { error: 'Choose a category.' };
+
+  const date = $('date').value; // date inputs always give yyyy-mm-dd
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { error: 'Choose a date.' };
+
+  const note = $('note').value.trim();
+  if (note.length > MAX_NOTE_LENGTH) return { error: 'The note can be at most 200 characters.' };
+
+  return { expense: { amount, category, date, note } };
+}
+
+/**
+ * Handles "Add expense": shows the entry straight away, then saves it in the
+ * background. The id is made here (a random UUID) so the entry has the same
+ * id on screen and on the server, and a retry can't create a duplicate.
+ */
+function handleAddSubmit(event) {
+  event.preventDefault(); // stop the browser reloading the page
+  const { expense: values, error } = readAddForm();
+  if (error) {
+    $('form-error').textContent = error;
+    $('form-error').hidden = false;
+    return;
+  }
+
+  const expense = {
+    ...values,
+    id: makeId(),
+    hasReceipt: false,
+    createdAt: new Date().toISOString(),
+    status: 'saving',
+  };
+  state.expenses.push(expense);
+  sortExpenses();
+  saveCache();
+  renderAll();
+
+  resetAddForm();
+  $('amount').focus();
+  showToast('Added ' + money.format(expense.amount) + ' · ' + expense.category);
+  saveExpense(expense.id);
+}
+
+/**
+ * Sends one not-yet-saved entry to the server. On success the local copy is
+ * replaced by the server's copy (which has no status). On failure it is
+ * marked "failed" with the reason, and History shows a Retry button.
+ */
+async function saveExpense(id) {
+  const expense = findExpense(id);
+  if (!expense) return;
+  expense.status = 'saving';
+  delete expense.error;
+  renderAll();
+
+  try {
+    const { id: expenseId, date, amount, category, note } = expense;
+    const result = await callApi('add', { expense: { id: expenseId, date, amount, category, note } });
+    const index = state.expenses.findIndex((e) => e.id === id);
+    if (index !== -1) state.expenses[index] = result.expense;
+  } catch (err) {
+    const current = findExpense(id);
+    if (current) {
+      current.status = 'failed';
+      current.error = err.message;
+    }
+    showToast('Not saved: ' + err.message, true);
+  }
+  sortExpenses();
+  saveCache();
+  renderAll();
+}
+
+// ---------------------------------------------------------------------------
+// History screen
+// ---------------------------------------------------------------------------
+
+/** Works out which button in History was tapped, and on which entry. */
+function handleHistoryClick(event) {
+  const button = event.target.closest('button[data-action]');
+  if (!button) return;
+  if (button.dataset.action === 'delete') deleteExpense(button.dataset.id);
+  if (button.dataset.action === 'retry') saveExpense(button.dataset.id);
+}
+
+/**
+ * Deletes an entry after the user confirms. It disappears at once; if the
+ * server then fails, it is put back and the user is told.
+ * NOT_FOUND counts as success: it means the server never had it (e.g. an
+ * entry whose save had failed) or it was already deleted.
+ */
+async function deleteExpense(id) {
+  const expense = findExpense(id);
+  if (!expense || expense.status === 'saving') return;
+  const label = expense.category + ' ' + money.format(expense.amount) + ' on ' + formatDay(expense.date);
+  if (!confirm('Delete ' + label + '?')) return;
+
+  state.expenses = state.expenses.filter((e) => e.id !== id);
+  state.deleting.add(id);
+  saveCache();
+  renderAll();
+
+  try {
+    await callApi('delete', { id });
+    showToast('Deleted');
+  } catch (err) {
+    if (err.code !== 'NOT_FOUND') {
+      state.expenses.push(expense);
+      sortExpenses();
+      saveCache();
+      renderAll();
+      showToast('Could not delete: ' + err.message, true);
+    }
+  } finally {
+    state.deleting.delete(id);
+  }
+}
+
+/** Redraws every screen that shows entries. Cheap at this app's size. */
+function renderAll() {
+  renderHistory();
+  renderSummary();
+}
+
+/**
+ * Draws History: entries grouped under a heading per day.
+ * Uses textContent (never innerHTML) for user text, so a note like
+ * "<script>" is shown as text, not run as code.
+ */
+function renderHistory() {
+  const container = $('history-list');
+  container.replaceChildren();
   $('empty-list').hidden = state.expenses.length > 0;
 
+  let currentDay = null;
+  let list = null;
   for (const expense of state.expenses) {
+    if (expense.date !== currentDay) {
+      currentDay = expense.date;
+      list = createElement('ul', 'expense-list');
+      container.append(createElement('h3', 'day-heading', formatDay(expense.date)), list);
+    }
+    list.append(renderExpenseItem(expense));
+  }
+}
+
+/** Builds one entry in the History list, with its status and buttons. */
+function renderExpenseItem(expense) {
+  const item = createElement('li', 'expense');
+  if (expense.status) item.classList.add('is-' + expense.status);
+
+  const main = createElement('div', 'expense-main');
+  main.append(createElement('div', 'expense-category', expense.category));
+  if (expense.status === 'saving') {
+    main.append(createElement('div', 'expense-meta saving', 'Saving…'));
+  } else if (expense.status === 'failed') {
+    main.append(createElement('div', 'expense-meta failed', 'Not saved: ' + (expense.error || 'unknown error')));
+  }
+  if (expense.note) main.append(createElement('div', 'expense-meta', expense.note));
+
+  const side = createElement('div', 'expense-side');
+  side.append(createElement('div', 'expense-amount', money.format(expense.amount)));
+  if (expense.status === 'failed') {
+    side.append(createButton('Retry', 'retry', expense.id, 'small-button'));
+  }
+  const del = createButton('Delete', 'delete', expense.id, 'small-button danger');
+  del.disabled = expense.status === 'saving';
+  side.append(del);
+
+  item.append(main, side);
+  return item;
+}
+
+// ---------------------------------------------------------------------------
+// Summary screen
+// ---------------------------------------------------------------------------
+
+/**
+ * Draws the Summary for state.summaryMonth: total, number of entries, and a
+ * total per category (largest first) with its share of the month.
+ * Calculated on the phone from rows already loaded, so it is instant.
+ * Sums are done in whole sen (cents) to avoid errors like 0.1 + 0.2 = 0.30000000000000004.
+ */
+function renderSummary() {
+  const month = state.summaryMonth;
+  $('month-label').textContent = formatMonth(month);
+  $('next-month').disabled = month >= currentMonth();
+
+  const entries = state.expenses.filter((e) => e.date.startsWith(month + '-'));
+  const senByCategory = {};
+  let totalSen = 0;
+  for (const e of entries) {
+    const sen = Math.round(e.amount * 100);
+    senByCategory[e.category] = (senByCategory[e.category] || 0) + sen;
+    totalSen += sen;
+  }
+
+  $('month-total').textContent = money.format(totalSen / 100);
+  $('month-count').textContent = entries.length + (entries.length === 1 ? ' entry' : ' entries');
+
+  const list = $('category-totals');
+  list.replaceChildren();
+  const rows = Object.entries(senByCategory).sort((a, b) => b[1] - a[1]);
+  if (!rows.length) {
+    list.append(createElement('li', 'muted', 'No spending this month.'));
+  }
+  for (const [category, sen] of rows) {
     const item = document.createElement('li');
-    item.className = 'expense';
-
-    const main = document.createElement('div');
-    main.className = 'expense-main';
-    const category = document.createElement('div');
-    category.className = 'expense-category';
-    category.textContent = expense.category;
-    const meta = document.createElement('div');
-    meta.className = 'expense-meta';
-    meta.textContent = expense.note ? expense.date + ' · ' + expense.note : expense.date;
-    main.append(category, meta);
-
-    const amount = document.createElement('div');
-    amount.className = 'expense-amount';
-    amount.textContent = money.format(expense.amount);
-
-    item.append(main, amount);
+    const amount = createElement('span', 'amount', money.format(sen / 100));
+    amount.append(createElement('span', 'percent', Math.round((sen / totalSen) * 100) + '%'));
+    item.append(createElement('span', '', category), amount);
     list.append(item);
   }
 }
 
+/** Moves the Summary one month back (-1) or forward (+1), never past this month. */
+function changeMonth(delta) {
+  const [year, month] = state.summaryMonth.split('-').map(Number);
+  const d = new Date(year, month - 1 + delta, 1); // Date handles year roll-over
+  const next = d.getFullYear() + '-' + pad2(d.getMonth() + 1);
+  if (next > currentMonth()) return;
+  state.summaryMonth = next;
+  renderSummary();
+}
+
 // ---------------------------------------------------------------------------
-// Screens and messages
+// Screens, messages and small helpers
 // ---------------------------------------------------------------------------
 
 /** Shows the sign-in screen, optionally with a message (red if isError). */
@@ -290,16 +594,103 @@ function showApp() {
   $('app-screen').hidden = false;
   $('user-email').textContent = state.user.email;
   state.expenses = loadCache();
-  renderExpenses();
+  sortExpenses();
+  renderAll();
+  showScreen(state.screen);
   loadExpenses();
 }
 
-/** Shows a status line above the list; an empty message hides it. */
+/** Shows one screen ('add', 'history', 'summary', 'settings') and highlights its tab. */
+function showScreen(name) {
+  state.screen = name;
+  for (const section of document.querySelectorAll('.view')) {
+    section.hidden = section.id !== 'screen-' + name;
+  }
+  for (const tab of document.querySelectorAll('.tabbar button')) {
+    if (tab.dataset.screen === name) tab.setAttribute('aria-current', 'page');
+    else tab.removeAttribute('aria-current');
+  }
+  window.scrollTo(0, 0);
+}
+
+/** Shows a status line at the top of the app; an empty message hides it. */
 function setStatus(message, isError = false) {
   const box = $('status');
   box.textContent = message;
   box.hidden = !message;
   box.classList.toggle('error', isError);
+}
+
+/** Shows a short pop-up message for a few seconds (longer for errors). */
+function showToast(message, isError = false) {
+  const toast = $('toast');
+  toast.textContent = message;
+  toast.classList.toggle('error', isError);
+  toast.hidden = false;
+  clearTimeout(showToast.timer); // a function can hold a value, like an object
+  showToast.timer = setTimeout(() => { toast.hidden = true; }, isError ? 5000 : 2500);
+}
+
+/** Makes an element with a class and (optional) text, safely via textContent. */
+function createElement(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+
+/** Makes a button that handleHistoryClick() will recognise. */
+function createButton(text, action, id, className) {
+  const button = createElement('button', className, text);
+  button.type = 'button';
+  button.dataset.action = action;
+  button.dataset.id = id;
+  return button;
+}
+
+/**
+ * A random, unique id for a new entry, like "3f2b9c1e-...".
+ * crypto.randomUUID() only exists on secure pages (https or localhost);
+ * the fallback builds 16 random bytes as hex, which is just as unique.
+ */
+function makeId() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** "5" → "05", for building dates. */
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+/**
+ * Today's date as yyyy-mm-dd in the phone's own time zone.
+ * (new Date().toISOString() would give UTC, which in Malaysia is the wrong
+ * day until 8 am.)
+ */
+function today() {
+  const d = new Date();
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+}
+
+/** This month as yyyy-mm. */
+function currentMonth() {
+  return today().slice(0, 7);
+}
+
+/** "2026-11-21" → "Sat, 21 Nov 2026". Built from parts so it stays in local time. */
+function formatDay(dateText) {
+  const [y, m, d] = dateText.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString('en-MY', {
+    weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
+  });
+}
+
+/** "2026-11" → "November 2026". */
+function formatMonth(monthText) {
+  const [y, m] = monthText.split('-').map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString('en-MY', { month: 'long', year: 'numeric' });
 }
 
 start();
