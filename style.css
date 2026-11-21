@@ -1,0 +1,103 @@
+/* style.css — the look of the app.
+   Colours are defined once as variables, then swapped for dark mode. */
+
+:root {
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --text: #1c1f23;
+  --muted: #69707a;
+  --line: #e3e6ea;
+  --accent: #1a7f5a;
+  --danger: #c0392b;
+  --radius: 12px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171a;
+    --card: #1f2226;
+    --text: #eceef1;
+    --muted: #9aa1ab;
+    --line: #30343a;
+    --accent: #4cc596;
+    --danger: #ff7b6e;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+/* One centred column, comfortable on phones and desktops. */
+.screen {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+/* The HTML "hidden" attribute must win over any display rule. */
+[hidden] { display: none !important; }
+
+h1 { margin: 48px 0 4px; font-size: 1.8rem; }
+h2 { margin: 0; font-size: 1.15rem; }
+
+.tagline, .muted { color: var(--muted); }
+.google-button { margin: 24px 0; min-height: 44px; }
+.privacy { font-size: 0.85rem; color: var(--muted); }
+
+.message {
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+.message.error { border-color: var(--danger); color: var(--danger); }
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 12px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+.user-email { color: var(--muted); font-size: 0.9rem; overflow-wrap: anywhere; }
+
+.section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+  padding: 8px 4px;
+}
+
+/* Entry list */
+.expense-list { list-style: none; margin: 0; padding: 0; }
+.expense {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.expense-main { min-width: 0; }
+.expense-category { font-weight: 600; }
+.expense-meta { color: var(--muted); font-size: 0.85rem; overflow-wrap: anywhere; }
+.expense-amount { font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }

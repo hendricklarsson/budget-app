@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Budget Tracker</title>
+  <link rel="stylesheet" href="style.css">
+  <!-- "defer" runs the scripts in this order after the page is parsed:
+       Google's sign-in library first, then our settings, then our app. -->
+  <script src="https://accounts.google.com/gsi/client" defer></script>
+  <script src="config.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+
+  <!-- Sign-in screen: shown when nobody is signed in. -->
+  <main id="signin-screen" class="screen" hidden>
+    <h1>Budget Tracker</h1>
+    <p class="tagline">Track your daily spending in RM.</p>
+    <p id="signin-message" class="message" hidden></p>
+    <div id="google-button" class="google-button"></div>
+    <p class="privacy">
+      This is a personal portfolio project. Your entries are stored in the
+      developer's Google Sheet and your receipts in the developer's Google
+      Drive. Only you can see your data in the app. You can delete all of it
+      at any time from Settings.
+    </p>
+  </main>
+
+  <!-- Main app: shown after sign-in. Later phases add Add / Summary / Settings. -->
+  <main id="app-screen" class="screen" hidden>
+    <header class="topbar">
+      <span id="user-email" class="user-email"></span>
+      <button id="signout-button" type="button" class="link-button">Sign out</button>
+    </header>
+
+    <section>
+      <div class="section-head">
+        <h2>Your entries</h2>
+        <button id="refresh-button" type="button" class="link-button">Refresh</button>
+      </div>
+      <p id="status" class="message" hidden></p>
+      <ul id="expense-list" class="expense-list"></ul>
+      <p id="empty-list" class="muted" hidden>No entries yet.</p>
+    </section>
+  </main>
+
+</body>
+</html>
