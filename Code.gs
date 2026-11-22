@@ -160,7 +160,9 @@ function handleAction_(request, email) {
   switch (request.action) {
     case 'list':         return listExpenses_(email);
     case 'add':          return addExpense_(request.expense, email);
+    case 'update':       return updateExpense_(request.expense, email);
     case 'delete':       return deleteExpense_(request.id, email);
+    case 'deleteMany':   return deleteManyExpenses_(request.ids, email);
     case 'getReceipt':   return getReceipt_(request.id, email);
     case 'deleteMyData': return deleteMyData_(email);
     default:
@@ -344,7 +346,7 @@ function addExpense_(input, email) {
   // 1. Quick checks before uploading anything, so we never upload for nothing.
   const existing = findRowById_(readAllRows_(sheet), expense.id);
   if (existing) return duplicateResult_(existing, email);
-  checkLimits_(email, hasReceipt);
+  checkLimits_(email, true, hasReceipt);
 
   // 2. The slow part, outside the lock.
   const receiptFileId = hasReceipt ? getReceiptFolder_().createFile(receiptBlob).getId() : '';
@@ -358,9 +360,9 @@ function addExpense_(input, email) {
         trashFile_(receiptFileId);
         return duplicateResult_(found, email);
       }
-      checkLimits_(email, hasReceipt);
+      checkLimits_(email, true, hasReceipt);
       const saved = writeExpenseRow_(sheet, expense, email, receiptFileId);
-      recordUsage_(email, hasReceipt);
+      recordUsage_(email, true, hasReceipt);
       return { expense: saved };
     });
   } catch (err) {
@@ -407,6 +409,79 @@ function writeExpenseRow_(sheet, expense, email, receiptFileId) {
   range.setNumberFormats([COLUMN_FORMATS]); // set text format BEFORE writing
   range.setValues([row]);
   return rowToExpense_(row);
+}
+
+/**
+ * action "update": changes an existing entry (Edit Expense in the app).
+ * input = {id, date, amount, category, note, photo}, where photo is:
+ *   missing          → keep the current photo,
+ *   'remove'         → remove it,
+ *   {mimeType, data} → replace it (or add one if there was none).
+ * Same order as add: a new photo is uploaded BEFORE taking the lock, and the
+ * old photo is trashed AFTER releasing it, so other saves never wait on Drive.
+ */
+function updateExpense_(input, email) {
+  const expense = validateExpense_(input);
+  const photo = input.photo;
+  const removePhoto = photo === 'remove';
+  const newBlob = photo && !removePhoto ? decodeReceipt_(photo, expense.id) : null;
+  const sheet = getSheet_();
+
+  // Quick check before uploading anything.
+  const current = findRowById_(readAllRows_(sheet), expense.id);
+  if (!current || !isOwner_(current, email) || isDeleted_(current)) {
+    throw new ApiError('NOT_FOUND', 'That entry was not found.');
+  }
+  if (newBlob) checkLimits_(email, false, true);
+
+  const newFileId = newBlob ? getReceiptFolder_().createFile(newBlob).getId() : '';
+  let oldFileId = '';
+  try {
+    const saved = withLock_(function () {
+      const rows = readAllRows_(sheet);
+      for (let i = 0; i < rows.length; i++) {
+        if (String(rows[i][COL.id]) !== expense.id || !isOwner_(rows[i], email) || isDeleted_(rows[i])) continue;
+        const row = rows[i].slice();          // keep id, email, createdAt as they are
+        oldFileId = String(row[COL.receiptFileId] || '');
+        row[COL.date] = expense.date;
+        row[COL.amount] = expense.amount;
+        row[COL.category] = expense.category;
+        row[COL.note] = safeText_(expense.note);
+        if (newBlob) row[COL.receiptFileId] = newFileId;
+        else if (removePhoto) row[COL.receiptFileId] = '';
+        const range = sheet.getRange(i + 2, 1, 1, HEADERS.length);
+        range.setNumberFormats([COLUMN_FORMATS]);
+        range.setValues([row]);
+        if (newBlob) recordUsage_(email, false, true);
+        return rowToExpense_(row);
+      }
+      throw new ApiError('NOT_FOUND', 'That entry was not found.');
+    });
+    // The old photo is no longer used: move it to the trash.
+    if ((newBlob || removePhoto) && oldFileId) trashFile_(oldFileId);
+    return { expense: saved };
+  } catch (err) {
+    trashFile_(newFileId); // don't leave an unused new photo behind
+    throw err;
+  }
+}
+
+/**
+ * action "deleteMany": deletes several of the user's entries at once
+ * (History's edit mode), removing their rows and trashing their photos.
+ * One lock and one pass over the sheet, instead of one request per entry.
+ */
+function deleteManyExpenses_(ids, email) {
+  if (!Array.isArray(ids) || ids.length < 1 || ids.length > 100) {
+    throw new ApiError('BAD_REQUEST', 'Choose between 1 and 100 entries to delete.');
+  }
+  const wanted = {};
+  ids.forEach(function (id) { wanted[validateId_(id)] = true; });
+  const removed = removeRows_(function (row) {
+    return isOwner_(row, email) && wanted[String(row[COL.id])] === true;
+  });
+  trashFiles_(removed.fileIds);
+  return { deleted: removed.rows };
 }
 
 /**
@@ -539,18 +614,20 @@ function trashFile_(fileId) {
 
 /**
  * Throws a LIMIT error if this save would go over a daily limit, for this
- * user or for everyone together. Counts live in Script Properties as
- * {day, adds, receipts}: one entry per user (keyed by a hash of their email)
- * plus one for everyone. A new day simply starts again from zero.
+ * user or for everyone together. newEntry: the save adds an entry.
+ * withReceipt: the save uploads a photo (when adding, or editing in a new one).
+ * Counts live in Script Properties as {day, adds, receipts}: one entry per
+ * user (keyed by a hash of their email) plus one for everyone. A new day
+ * simply starts again from zero.
  */
-function checkLimits_(email, withReceipt) {
+function checkLimits_(email, newEntry, withReceipt) {
   const mine = readUsage_(userUsageKey_(email));
   const everyone = readUsage_('usage:all');
-  if (mine.adds >= MAX_ADDS_PER_USER_PER_DAY) {
+  if (newEntry && mine.adds >= MAX_ADDS_PER_USER_PER_DAY) {
     throw new ApiError('LIMIT', "You've reached today's limit of " + MAX_ADDS_PER_USER_PER_DAY +
       ' entries. Please try again tomorrow.');
   }
-  if (everyone.adds >= MAX_ADDS_ALL_USERS_PER_DAY) {
+  if (newEntry && everyone.adds >= MAX_ADDS_ALL_USERS_PER_DAY) {
     throw new ApiError('LIMIT', 'The app is very busy today. Please try again tomorrow.');
   }
   if (withReceipt && mine.receipts >= MAX_RECEIPTS_PER_USER_PER_DAY) {
@@ -563,12 +640,12 @@ function checkLimits_(email, withReceipt) {
   }
 }
 
-/** Adds one save (and maybe one photo) to today's counts. Call inside the lock. */
-function recordUsage_(email, withReceipt) {
+/** Adds one entry and/or one photo to today's counts. Call inside the lock. */
+function recordUsage_(email, newEntry, withReceipt) {
   const updates = {};
   [userUsageKey_(email), 'usage:all'].forEach(function (key) {
     const usage = readUsage_(key);
-    usage.adds++;
+    if (newEntry) usage.adds++;
     if (withReceipt) usage.receipts++;
     updates[key] = JSON.stringify(usage);
   });
