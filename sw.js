@@ -11,7 +11,7 @@
 // version to bump); when offline you get the last copy that worked.
 
 // Change this name only if you want to throw away every old cached file.
-const CACHE_NAME = 'sen-tracker-v3';
+const CACHE_NAME = 'sen-tracker-v4';
 
 // The files that make up the app. Paths are relative to sw.js, so they work
 // both on localhost and under /budget-app/ on GitHub Pages.

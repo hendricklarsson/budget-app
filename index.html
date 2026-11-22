@@ -63,6 +63,7 @@
     <div class="signin-bottom">
       <div id="signin-message" class="banner" hidden></div>
       <div id="google-button" class="google-button"></div>
+      <button id="demo-button" type="button" class="btn btn-secondary btn-block">Try the Demo, No Sign-In</button>
       <p class="signin-foot">
         <span>We use Google only to sign you in.</span>
         <a href="privacy.html">Privacy</a>
@@ -70,7 +71,7 @@
     </div>
   </main>
 
-  <!-- ================= The app (after sign-in) ================= -->
+  <!-- ================= The app (after sign-in, or in demo mode) ================= -->
   <div id="app-screen" hidden>
     <main id="app-main" class="app">
 
@@ -83,74 +84,85 @@
       <!-- Settings: filled in by renderSettings() -->
       <section id="screen-settings" class="screen" aria-labelledby="settings-title" hidden></section>
 
-      <!-- Add Expense and Edit Expense share this one form. -->
+      <!-- Add Expense and Edit Expense share this one form. The order follows
+           how people remember a purchase: how much, when, what it was, then
+           the category. The tab bar is hidden here; the ways out are the
+           Record/Save button or Back. -->
       <section id="screen-form" class="screen" aria-labelledby="form-title" hidden>
-        <div id="form-top" class="form-head-top" hidden>
-          <button id="form-cancel" type="button" class="btn btn-secondary btn-small">Cancel</button>
+        <div class="form-top">
+          <button id="form-back" type="button" class="btn btn-secondary btn-small"><span data-icon="back"></span>Back</button>
         </div>
+        <div id="form-demo-banner"></div>
         <div class="screen-head">
           <h1 id="form-title" class="title">Add Expense <span id="form-subtitle" class="sub"></span></h1>
         </div>
+        <p class="required-note"><span class="req" aria-hidden="true">*</span> Required</p>
 
         <form id="expense-form" class="form" novalidate>
-          <div id="form-banner" class="banner banner-error" role="alert" hidden></div>
-
-          <div class="form-section">
-            <label for="amount" class="field-label">Amount</label>
+          <div class="card glass form-card">
+            <label id="amount-label" for="amount" class="field-label">
+              <span>Amount <span class="req" aria-hidden="true">*</span></span>
+            </label>
             <div id="amount-panel" class="amount-panel">
               <span class="currency" aria-hidden="true">RM</span>
-              <input id="amount" class="amount-input" type="text" inputmode="decimal"
+              <input id="amount" class="amount-input" type="text" inputmode="decimal" required aria-required="true"
                      autocomplete="off" placeholder="0.00" aria-describedby="amount-error">
             </div>
-            <p id="amount-error" class="field-error" hidden>Type an amount first.</p>
+            <p id="amount-error" class="field-error" hidden><span id="amount-error-icon"></span><span id="amount-error-text">Type an amount first.</span></p>
           </div>
 
-          <div class="form-section">
-            <p id="category-label" class="field-label">Category</p>
-            <!-- A radio group of chips, built by app.js from CATEGORIES. -->
-            <div id="category-chips" class="chips" role="radiogroup" aria-labelledby="category-label"></div>
-          </div>
-
-          <div class="panel details">
-            <div class="details-row">
-              <span id="date-icon"></span>
-              <span id="date-label" class="grow">Today</span>
-              <button id="date-change" type="button" class="link-button">Change<span class="visually-hidden"> date</span></button>
-              <input id="date" type="date" class="visually-hidden" tabindex="-1" aria-label="Date">
-            </div>
-
-            <button id="details-toggle" type="button" class="details-row" aria-expanded="false" aria-controls="details-open">
-              <span id="details-icon"></span>
-              <span class="grow">Note or Photo</span>
-              <span id="details-chevron"></span>
-            </button>
-
-            <div id="details-open" class="details-open" hidden>
-              <div>
-                <label for="note" class="field-label">Note <span id="note-count" class="count">0 of 200</span></label>
-                <input id="note" class="text-input" type="text" maxlength="200" autocomplete="off"
-                       placeholder="e.g. Grab to KLCC">
+          <div class="card glass">
+            <div class="panel">
+              <!-- When: the real date-and-time picker is hidden; Change opens it. -->
+              <div class="details-row">
+                <span data-icon="calendar"></span>
+                <span id="when-label" class="grow">Today</span>
+                <button id="when-change" type="button" class="link-button">Change<span class="visually-hidden"> date and time</span></button>
+                <input id="when" type="datetime-local" class="visually-hidden" tabindex="-1" aria-label="Date and time">
               </div>
-              <div>
-                <p class="field-label">Photo</p>
-                <div class="photo-row">
-                  <img id="photo-thumb" class="photo-thumb" alt="Receipt photo" hidden>
-                  <!-- The real file picker is hidden; the buttons open it. -->
-                  <input id="photo-input" type="file" accept="image/*" class="visually-hidden" tabindex="-1">
-                  <button id="photo-add" type="button" class="btn btn-secondary btn-small">Add Photo</button>
+              <!-- What: an open note field, not hidden away. -->
+              <label class="details-row">
+                <span data-icon="note"></span>
+                <input id="note" class="inline-input" type="text" maxlength="200" autocomplete="off"
+                       placeholder="Add a note" aria-label="Note (optional)">
+              </label>
+              <!-- Receipt photo: a button to add one, or the photo with Replace/Remove. -->
+              <div id="photo-row">
+                <input id="photo-input" type="file" accept="image/*" class="visually-hidden" tabindex="-1">
+                <button id="photo-add" type="button" class="details-row"><span data-icon="camera"></span><span class="grow">Add Receipt Photo</span></button>
+                <div id="photo-has" class="details-row" hidden>
+                  <img id="photo-thumb" class="photo-thumb" alt="Receipt photo">
+                  <span class="grow">Receipt photo</span>
                   <button id="photo-replace" type="button" class="btn btn-secondary btn-small" hidden>Replace</button>
-                  <button id="photo-remove" type="button" class="btn btn-secondary btn-small is-danger" hidden>Remove Photo</button>
+                  <button id="photo-remove" type="button" class="btn btn-secondary btn-small is-danger">Remove</button>
                 </div>
               </div>
             </div>
           </div>
 
-          <button id="save-button" type="submit" class="btn btn-primary btn-block">Save</button>
+          <div class="form-section">
+            <p id="category-label" class="field-label"><span>Category <span class="req" aria-hidden="true">*</span></span></p>
+            <!-- In Edit, the category shows as one row; tap it to change. -->
+            <div id="category-row-wrap" class="card glass" style="margin:0 -6px 10px" hidden>
+              <div class="panel">
+                <button id="category-row" type="button" class="details-row category-row" aria-expanded="false" aria-controls="category-chips">
+                  <span class="grow" style="color:#4b505b">Category</span>
+                  <span id="category-value" class="value"></span>
+                  <span data-icon="next"></span>
+                </button>
+              </div>
+            </div>
+            <!-- A radio group of chips, built by app.js from CATEGORIES. -->
+            <div id="category-chips" class="chips" role="radiogroup" aria-labelledby="category-label" aria-required="true"></div>
+          </div>
+
+          <div id="form-banner" class="banner banner-error form-banner" role="alert" hidden></div>
+          <button id="save-button" type="submit" class="btn btn-primary btn-block form-submit">Record Expense</button>
         </form>
       </section>
     </main>
 
-    <!-- Navigation: three tabs in a glass pill, plus a separate Add button. -->
+    <!-- Navigation: labelled tabs in a glass pill, plus a separate Add button. -->
     <nav id="tabbar" class="tabbar" aria-label="Main">
       <div class="tabs glass">
         <button type="button" class="tab" data-screen="overview"><span data-icon="home"></span>Home</button>

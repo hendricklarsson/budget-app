@@ -3,7 +3,8 @@
 // Big picture:
 //   1. Google Sign-In gives us an "ID token" (a signed text that says who the
 //      user is). We keep it and send it with every request.
-//   2. callApi() POSTs {action, idToken, ...} to the Apps Script URL.
+//   2. callApi() POSTs {action, idToken, ...} to the Apps Script URL. In demo
+//      mode it answers from sample data in memory instead (demoApi).
 //   3. The user's entries live in state.expenses and are cached in
 //      localStorage, so screens draw instantly; the server is refreshed in the
 //      background. Every screen is drawn from state by a render function.
@@ -13,9 +14,9 @@
 // Sections (search for the numbers):
 //   1. Settings and state      9. Choose period pop-up
 //   2. Icons and tiny helpers  10. Add and Edit expense
-//   3. Start-up                11. History
+//   3. Start-up and demo       11. History
 //   4. Sign-in and session     12. Receipts
-//   5. Talking to the script   13. Settings and Delete my data
+//   5. Talking to the script   13. Settings, your name, Delete my data
 //   6. Entries and the cache   14. PDF statement
 //   7. Dates and money         15. Toast, banners and pop-ups
 //   8. Navigation and Overview
@@ -34,6 +35,7 @@ const MAX_NOTE_LENGTH = 200;
 const TOKEN_KEY = 'sen.session';               // where the sign-in is kept
 const CACHE_PREFIX = 'sen.expenses.';          // + email: one cache per user
 const PENDING_DELETE_PREFIX = 'sen.pendingDelete.'; // + email: deletes not sent yet
+const NAME_PREFIX = 'sen.name.';               // + email: the name chosen in Settings
 const LAST_CATEGORY_KEY = 'sen.lastCategory';  // the category used last time
 const EXPIRY_MARGIN_MS = 60 * 1000;            // treat tokens as expired 1 min early
 const REFRESH_BEFORE_MS = 5 * 60 * 1000;       // try to renew the sign-in 5 min before it ends
@@ -47,8 +49,10 @@ const SCREEN_MESH = { overview: 'sky', history: 'lime', form: 'bloom', settings:
 const state = {
   idToken: null,        // the raw Google ID token, sent to the script
   user: null,           // {email, name, exp} read from the token, for display only
+  demo: false,          // true in demo mode: sample data in memory, nothing saved
+  demoStore: null,      // demo mode's pretend server: {rows, photos}
   // The user's entries. Each is
-  // {id, date, amount, category, note, hasReceipt, createdAt, status?, error?, errorCode?, receipt?}
+  // {id, date, time, amount, category, note, hasReceipt, createdAt, status?, error?, errorCode?, receipt?}
   // status is only set on entries not yet on the server: 'saving' or 'failed',
   // and receipt ({mimeType, data}) is a photo waiting to be uploaded.
   expenses: [],
@@ -61,13 +65,13 @@ const state = {
   receiptCache: new Map(),   // id → image already loaded, so opening it twice is instant
 
   screen: 'overview',   // 'overview' | 'history' | 'settings' | 'form'
+  previousScreen: 'overview', // where Back on the form returns to
   period: null,         // Overview's period: {type: 'day'|'month'|'year', value}
-  weekDay: null,        // the day picked in Overview's "This week" strip
+  weekDay: null,        // the day picked in Overview's "This Week" strip
   historyMonth: null,   // 'yyyy-mm' shown in History
-  expandedId: null,     // the History entry whose buttons are showing
   selecting: false,     // History's edit mode (choosing entries)
   selected: new Set(),  // ids chosen in edit mode
-  form: null,           // the Add/Edit form: {mode, id?, original?, photo, saving}
+  form: null,           // the Add/Edit form: {mode, id?, original?, photo, saving, failed, whenChanged}
 
   refreshTimer: null,   // renews the sign-in shortly before it expires
   expiryTimer: null,    // asks the user to sign in again if renewing didn't work
@@ -85,12 +89,12 @@ const ICONS = {
   history: 'M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6',
   settings: 'M4 7h10M18 7h2M4 17h4M12 17h8M16 5a2 2 0 1 0 0 4a2 2 0 1 0 0-4zM10 15a2 2 0 1 0 0 4a2 2 0 1 0 0-4z',
   plus: 'M12 5v14M5 12h14',
-  minus: 'M5 12h14',
   calendar: 'M4 5h16v15H4zM4 10h16M9 3v4M15 3v4',
+  note: 'M6 3h12v18H6zM9 8h6M9 12h6M9 16h3',
+  camera: 'M4 8h3.5l2-3h5l2 3H20v11H4zM12 10.5a3 3 0 1 0 0 6a3 3 0 1 0 0-6z',
   next: 'M9 5l7 7-7 7',
   back: 'M15 5l-7 7 7 7',
   down: 'M6 9l6 6 6-6',
-  up: 'M6 15l6-6 6 6',
   close: 'M6 6l12 12M18 6L6 18',
   check: 'M5 12.5l4.5 4.5L19 7',
   edit: 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4',
@@ -108,6 +112,7 @@ const ICONS = {
   shield: 'M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z',
   arrowDown: 'M12 5v14M6 13l6 6 6-6',
   arrowUp: 'M12 19V5M6 11l6-6 6 6',
+  equals: 'M6 9.5h12M6 14.5h12',
   receipt: 'M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6',
 };
 const CATEGORY_ICONS = {
@@ -144,7 +149,7 @@ function icon(name, size = 20, strokeWidth = 2) {
 /**
  * Builds an element in one line, e.g.
  *   h('button', {class: 'btn', onclick: save}, icon('check'), 'Save')
- * Props: class, text, on<event> handlers, anything else becomes an attribute
+ * Props: class, on<event> handlers, anything else becomes an attribute
  * (true → present, false/null → left out). Children: elements or text.
  * Text always goes in as text, never as HTML, so a note like "<script>" is
  * shown as typed and never runs.
@@ -157,11 +162,20 @@ function h(tag, props, ...children) {
     else if (key.startsWith('on')) el.addEventListener(key.slice(2), value);
     else el.setAttribute(key, value === true ? '' : value);
   }
-  for (const child of children.flat()) {
+  for (const child of children.flat(Infinity)) {
     if (child === null || child === undefined || child === false) continue;
     el.append(child instanceof Node ? child : document.createTextNode(String(child)));
   }
   return el;
+}
+
+/**
+ * Replaces an element's content. Like el.replaceChildren(), but skips empty
+ * parts (null, undefined, false), so optional pieces can be written inline
+ * as  condition ? part : null  without the word "null" appearing on screen.
+ */
+function setChildren(el, ...children) {
+  el.replaceChildren(...children.flat(Infinity).filter((c) => c !== null && c !== undefined && c !== false));
 }
 
 /**
@@ -179,18 +193,9 @@ function restoreFocus(container) {
   if (el) el.focus();
 }
 
-/**
- * Replaces an element's content. Like el.replaceChildren(), but skips empty
- * parts (null, undefined, false), so optional pieces can be written inline
- * as  condition ? part : null  without the word "null" appearing on screen.
- */
-function setChildren(el, ...children) {
-  el.replaceChildren(...children.flat().filter((c) => c !== null && c !== undefined && c !== false));
-}
-
 /** The coloured icon tile used in lists: category colour at 10%. */
 function categoryTile(category) {
-  return h('span', { class: 'tile', 'data-cat': category }, icon(category, 22));
+  return h('span', { class: 'tile', 'data-cat': category }, icon(category, 20));
 }
 
 /** plural(1, 'entry', 'entries') → "1 entry"; plural(3, ...) → "3 entries". */
@@ -209,7 +214,7 @@ function makeId() {
 }
 
 // ===========================================================================
-// 3. Start-up
+// 3. Start-up and demo
 // ===========================================================================
 
 /**
@@ -220,18 +225,12 @@ function start() {
   registerServiceWorker();
   moveOldStorage();
 
-  if (CLIENT_ID.startsWith('PASTE_') || SCRIPT_URL.startsWith('PASTE_')) {
-    showSignIn('Setup needed: put your Client ID and Script URL in config.js.', 'error');
-    return;
-  }
-
   state.period = { type: 'month', value: currentMonth() };
   state.historyMonth = currentMonth();
 
   // Icons in the fixed HTML (tab bar, form rows).
-  for (const slot of document.querySelectorAll('[data-icon]')) slot.replaceWith(icon(slot.dataset.icon, 22));
-  $('date-icon').replaceWith(icon('calendar', 22));
-  $('details-icon').replaceWith(icon('plus', 22));
+  for (const slot of document.querySelectorAll('[data-icon]')) slot.replaceWith(icon(slot.dataset.icon, 20));
+  $('amount-error-icon').replaceWith(icon('alert', 18));
 
   // Tab bar.
   for (const tab of document.querySelectorAll('[data-screen]')) {
@@ -240,14 +239,20 @@ function start() {
 
   setUpForm();
   $('delete-selected').addEventListener('click', confirmDeleteSelected);
+  $('demo-button').addEventListener('click', enterDemo);
 
   // Phones pause timers while the app is in the background, so when it comes
   // back we check the sign-in again. When it goes to the background, we send
   // any delete that was waiting for its Undo message to close.
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') commitPendingDelete();
-    if (document.visibilityState === 'visible' && state.idToken) scheduleSessionTimers();
+    if (document.visibilityState === 'visible' && state.idToken && !state.demo) scheduleSessionTimers();
   });
+
+  if (CLIENT_ID.startsWith('PASTE_') || SCRIPT_URL.startsWith('PASTE_')) {
+    showSignIn('Setup needed: put your Client ID and Script URL in config.js. You can still try the demo.', 'error');
+    return;
+  }
 
   initGoogleSignIn();
 
@@ -292,6 +297,100 @@ function registerServiceWorker() {
 }
 
 /**
+ * "Try the Demo, No Sign-In": opens the app with about seven weeks of sample
+ * spending, so the screens aren't empty. Everything stays in memory: nothing
+ * is sent to the server or stored on the phone, and leaving clears it.
+ */
+function enterDemo() {
+  state.demo = true;
+  state.demoStore = { rows: makeDemoEntries(), photos: new Map() };
+  state.idToken = 'demo';
+  state.user = { email: '', name: 'Demo User', exp: Date.now() / 1000 + 365 * 86400 };
+  state.screen = 'overview';
+  showApp();
+}
+
+/**
+ * Leaves the demo (Sign In, or Exit Demo): forgets all sample data and goes
+ * to the sign-in screen.
+ */
+function exitDemo(message = 'You left the demo. Nothing from it was kept.') {
+  clearUserData();
+  showSignIn(message, 'info');
+}
+
+/**
+ * The demo's sample spending: one to three entries a day from about seven
+ * weeks ago to today, chosen by fixed rules (not random), so it looks the
+ * same every time.
+ */
+function makeDemoEntries() {
+  const items = {
+    Food: [['Nasi lemak, teh tarik', 12.5], ['Roti canai', 6.5], ['Mamak dinner', 18.2], ["Groceries, Lotus's", 96.4], ['Kopitiam breakfast', 9.8], ['Mixed rice lunch', 11.5]],
+    Transport: [['Grab to KLCC', 8.4], ['LRT top-up', 50], ['Petrol', 60], ['Touch n Go reload', 50]],
+    Bills: [['TNB electricity', 142.8], ['Unifi internet', 129], ['Mobile plan', 68], ['Water bill', 17]],
+    Shopping: [['Uniqlo socks', 25.4], ['Mr DIY', 117.9], ['Watsons', 24.9]],
+    Health: [['Clinic visit', 33.5], ['Guardian, vitamins', 38.9]],
+    Entertainment: [['GSC, 2 tickets', 22], ['Spotify', 17.9]],
+    Other: [['Gift wrapping', 16.4], ['Laundry', 12]],
+  };
+  const nowTime = currentTime();
+  const out = [];
+  let n = 0;
+  for (let day = addDays(today(), -50); day <= today(); day = addDays(day, 1)) {
+    const count = [1, 2, 1, 0, 2, 1, 3][parseDate(day).getDay()];
+    for (let k = 0; k < count; k++) {
+      n++;
+      const category = CATEGORIES[(n * 3 + k) % CATEGORIES.length];
+      const [note, amount] = items[category][n % items[category].length];
+      let time = pad2(8 + ((n * 5) % 13)) + ':' + pad2((n * 17) % 60);
+      if (day === today() && time > nowTime) time = nowTime; // nothing in the future
+      out.push({ id: 'demo' + String(n).padStart(6, '0'), date: day, time, amount, category, note, hasReceipt: false, createdAt: day + 'T' + time });
+    }
+  }
+  return out;
+}
+
+/**
+ * The demo's pretend server: answers the same actions as Code.gs, from
+ * memory, so every screen works exactly as it does when signed in.
+ */
+async function demoApi(action, data) {
+  const store = state.demoStore;
+  const fail = (message, code) => { throw Object.assign(new Error(message), { code }); };
+  if (action === 'list') return { expenses: store.rows.map((row) => ({ ...row })) };
+  if (action === 'add') {
+    const e = data.expense;
+    let row = store.rows.find((r) => r.id === e.id);
+    if (!row) {
+      row = { id: e.id, date: e.date, time: e.time || '', amount: e.amount, category: e.category, note: e.note || '', hasReceipt: Boolean(e.receipt), createdAt: new Date().toISOString() };
+      if (e.receipt) store.photos.set(e.id, e.receipt.data);
+      store.rows.push(row);
+    }
+    return { expense: { ...row } };
+  }
+  if (action === 'update') {
+    const e = data.expense;
+    const row = store.rows.find((r) => r.id === e.id);
+    if (!row) fail('That entry was not found.', 'NOT_FOUND');
+    Object.assign(row, { date: e.date, time: e.time || '', amount: e.amount, category: e.category, note: e.note || '' });
+    if (e.photo === 'remove') { row.hasReceipt = false; store.photos.delete(e.id); }
+    else if (e.photo) { row.hasReceipt = true; store.photos.set(e.id, e.photo.data); }
+    return { expense: { ...row } };
+  }
+  if (action === 'deleteMany') {
+    const ids = new Set(data.ids);
+    store.rows = store.rows.filter((r) => !ids.has(r.id));
+    return { deleted: ids.size };
+  }
+  if (action === 'getReceipt') {
+    if (!store.photos.has(data.id)) fail('No receipt for that entry.', 'NOT_FOUND');
+    return { id: data.id, mimeType: 'image/jpeg', data: store.photos.get(data.id) };
+  }
+  return fail('Not available in the demo.', 'BAD_REQUEST');
+}
+
+/**
  * Sets up "Sign in with Google" and draws its button. Google draws the
  * button itself (we can't restyle it), so we pick its black pill version,
  * the closest match to the design's primary button.
@@ -327,6 +426,7 @@ function initGoogleSignIn() {
  */
 function handleCredential(response) {
   const payload = decodeJwtPayload(response.credential);
+  if (state.demo) clearUserData(); // signing in ends the demo
   // A quiet renewal (see renewSignIn) for the person already using the app:
   // just swap in the new token and leave the screen exactly as it is.
   const isRenewal = Boolean(state.user) && state.user.email === payload.email && !$('app-screen').hidden;
@@ -376,7 +476,7 @@ function loadSession() {
 function scheduleSessionTimers() {
   clearTimeout(state.refreshTimer);
   clearTimeout(state.expiryTimer);
-  if (!state.user) return;
+  if (!state.user || state.demo) return;
   const msLeft = state.user.exp * 1000 - Date.now();
   if (msLeft <= EXPIRY_MARGIN_MS) {
     handleExpiredSession();
@@ -423,23 +523,23 @@ async function signOut() {
   showSignIn('You have signed out.', 'info');
 }
 
-/** Forgets everything about the current user on this device. */
+/** Forgets everything about the current user (or the demo) on this device. */
 function clearUserData() {
-  if (state.user) {
+  if (state.user && !state.demo) {
     localStorage.removeItem(CACHE_PREFIX + state.user.email);
     localStorage.removeItem(PENDING_DELETE_PREFIX + state.user.email);
+    localStorage.removeItem(TOKEN_KEY);
+    if (typeof google !== 'undefined' && google.accounts) google.accounts.id.disableAutoSelect();
   }
-  localStorage.removeItem(TOKEN_KEY);
   clearTimeout(state.refreshTimer);
   clearTimeout(state.expiryTimer);
   Object.assign(state, {
-    idToken: null, user: null, expenses: [], hasLoaded: false, offline: false, lastSync: null,
-    pendingDelete: null, selecting: false, expandedId: null, form: null,
+    idToken: null, user: null, demo: false, demoStore: null, expenses: [], hasLoaded: false, offline: false,
+    lastSync: null, pendingDelete: null, selecting: false, form: null, screen: 'overview',
   });
   state.selected.clear();
   state.recentlyEdited.clear();
   state.receiptCache.clear();
-  if (typeof google !== 'undefined' && google.accounts) google.accounts.id.disableAutoSelect();
 }
 
 // ===========================================================================
@@ -448,6 +548,7 @@ function clearUserData() {
 
 /**
  * Sends one request to the Apps Script backend and returns its JSON answer.
+ * In demo mode the pretend server in memory answers instead.
  *
  * Why text/plain: a JSON content type would make the browser send a CORS
  * "preflight" request first, which Apps Script can't answer. text/plain is a
@@ -458,6 +559,7 @@ function clearUserData() {
  * Throws an Error with .code: the server's code, or 'NETWORK'.
  */
 async function callApi(action, data = {}, options = {}) {
+  if (state.demo) return demoApi(action, data);
   if (!isSessionValid(state.user)) {
     handleExpiredSession();
     throw Object.assign(new Error('Please sign in again.'), { code: 'AUTH' });
@@ -520,8 +622,10 @@ async function loadExpenses() {
  * Saves this user's entries in localStorage, under a key with their email.
  * Unsaved entries include their photo, so a retry still has it after the app
  * is closed. If storage is full we just skip caching; the app still works.
+ * The demo stores nothing.
  */
 function saveCache() {
+  if (state.demo || !state.user) return;
   try {
     localStorage.setItem(CACHE_PREFIX + state.user.email,
       JSON.stringify({ v: 2, expenses: state.expenses, lastSync: state.lastSync }));
@@ -536,6 +640,7 @@ function saveCache() {
  * Older versions stored a plain list; both shapes are understood.
  */
 function loadCache() {
+  if (state.demo) return [];
   try {
     const cached = JSON.parse(localStorage.getItem(CACHE_PREFIX + state.user.email));
     const expenses = Array.isArray(cached) ? cached : (cached && cached.expenses) || [];
@@ -552,10 +657,11 @@ function loadCache() {
   }
 }
 
-/** Newest date first; on the same day, the most recently added first. */
+/** Newest first: by date, then time of day, then when it was added. */
 function sortExpenses() {
   state.expenses.sort((a, b) => {
     if (a.date !== b.date) return a.date < b.date ? 1 : -1;
+    if ((a.time || '') !== (b.time || '')) return (a.time || '') < (b.time || '') ? 1 : -1;
     return a.createdAt < b.createdAt ? 1 : -1;
   });
 }
@@ -589,8 +695,8 @@ async function saveExpense(id) {
   renderAll();
 
   try {
-    const { id: expenseId, date, amount, category, note, receipt } = expense;
-    const result = await callApi('add', { expense: { id: expenseId, date, amount, category, note, receipt } });
+    const { id: expenseId, date, time, amount, category, note, receipt } = expense;
+    const result = await callApi('add', { expense: { id: expenseId, date, time, amount, category, note, receipt } });
     if (receipt) state.receiptCache.set(id, 'data:image/jpeg;base64,' + receipt.data);
     const index = state.expenses.findIndex((e) => e.id === id);
     if (index !== -1) state.expenses[index] = result.expense;
@@ -612,8 +718,8 @@ async function saveExpense(id) {
  * Hides entries straight away and shows "Deleted · Undo". The delete is only
  * sent to the server when that message goes away (closed, replaced, the
  * screen changes, or the app goes to the background), so Undo is instant
- * and needs no server. The waiting ids are also stored, so a delete is still
- * sent if the app is closed while the message is up.
+ * and needs no server. The message never times out (WCAG 2.2.1). The waiting
+ * ids are also stored, so a delete is still sent if the app is closed.
  */
 function deleteWithUndo(ids, message) {
   hideToast();           // closing the current message sends an older waiting delete
@@ -626,7 +732,6 @@ function deleteWithUndo(ids, message) {
   const serverIds = entries.filter((e) => !e.status).map((e) => e.id);
   state.pendingDelete = { entries, serverIds };
   storePendingDelete(serverIds);
-  state.expandedId = null;
   saveCache();
   renderAll();
   showToast(message, { undo: undoDelete, onClose: commitPendingDelete });
@@ -676,7 +781,7 @@ async function commitPendingDelete() {
 
 /** Remembers (or forgets, with []) ids whose delete hasn't been sent yet. */
 function storePendingDelete(ids) {
-  if (!state.user) return;
+  if (!state.user || state.demo) return;
   const key = PENDING_DELETE_PREFIX + state.user.email;
   if (ids.length) localStorage.setItem(key, JSON.stringify(ids));
   else localStorage.removeItem(key);
@@ -687,6 +792,7 @@ function storePendingDelete(ids) {
  * send it now (the user had not pressed Undo).
  */
 function sendLeftoverDelete() {
+  if (state.demo) return;
   let ids = [];
   try {
     ids = JSON.parse(localStorage.getItem(PENDING_DELETE_PREFIX + state.user.email)) || [];
@@ -744,6 +850,18 @@ function today() {
   return toDateText(new Date());
 }
 
+/** The time now as "hh:mm" (24-hour), in the phone's time zone. */
+function currentTime() {
+  const d = new Date();
+  return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+}
+
+/** "09:41" → "9:41 am"; "20:15" → "8:15 pm". */
+function formatTime(time) {
+  const [hours, minutes] = time.split(':').map(Number);
+  return ((hours + 11) % 12 + 1) + ':' + pad2(minutes) + (hours < 12 ? ' am' : ' pm');
+}
+
 /** This month as yyyy-mm. */
 function currentMonth() {
   return today().slice(0, 7);
@@ -793,6 +911,16 @@ function formatMonth(month) {
 function formatMonthShort(month) {
   const [y, m] = month.split('-').map(Number);
   return y === new Date().getFullYear() ? MONTHS[m - 1] : MONTHS[m - 1] + ' ' + y;
+}
+
+/**
+ * When an entry happened, in words: "Today, 9:41 am", "Yesterday, 8:15 pm",
+ * or "Sat, 21 Nov 2026, 8:15 am" (with the year if asked). Older entries
+ * have no time, so only the day shows.
+ */
+function whenLabel(date, time, withYear) {
+  const day = date === today() ? 'Today' : date === addDays(today(), -1) ? 'Yesterday' : formatDay(date, withYear);
+  return time ? day + ', ' + formatTime(time) : day;
 }
 
 /** The words for a period: "November 2026", "Sat, 21 Nov 2026" or "2026". */
@@ -849,8 +977,8 @@ function showSignIn(message = '', kind = 'info') {
 }
 
 /**
- * Shows the app for the signed-in user: draws the cached entries at once,
- * then refreshes from the server in the background.
+ * Shows the app for the signed-in user (or the demo): draws the cached
+ * entries at once, then refreshes from the server in the background.
  */
 function showApp() {
   $('signin-screen').hidden = true;
@@ -875,6 +1003,7 @@ function showApp() {
 function showScreen(name) {
   if (name !== state.screen) hideToast();
   if (name !== 'history') stopSelecting();
+  if (name !== 'form' && state.screen !== 'form') state.previousScreen = name;
   state.screen = name;
   for (const section of document.querySelectorAll('#app-main > .screen')) {
     section.hidden = section.id !== 'screen-' + name;
@@ -883,28 +1012,26 @@ function showScreen(name) {
   updateNav();
   renderScreen(name);
   window.scrollTo(0, 0);
-  const title = document.querySelector('#screen-' + name + ' h1');
-  if (title) title.setAttribute('tabindex', '-1');
 }
 
 /**
  * Shows the right bottom bar: the tabs normally, the selection bar in
- * History's edit mode, and nothing while editing (a full-screen task).
+ * History's edit mode, and nothing on Add or Edit, so there is no second Add
+ * button to tap by mistake (the ways out are Save or Back).
  */
 function updateNav() {
-  const editing = state.screen === 'form' && state.form && state.form.mode === 'edit';
-  const current = state.screen === 'form' ? (editing ? '' : 'add') : state.screen;
-  $('tabbar').hidden = editing || state.selecting;
+  const onForm = state.screen === 'form';
+  $('tabbar').hidden = onForm || state.selecting;
   $('selectbar').hidden = !state.selecting;
-  $('app-main').classList.toggle('no-nav', editing);
-  $('toast').classList.toggle('no-nav', editing);
-  for (const tab of document.querySelectorAll('[data-screen]')) {
-    if (tab.dataset.screen === current) tab.setAttribute('aria-current', 'page');
+  $('app-main').classList.toggle('no-nav', onForm);
+  $('toast').classList.toggle('no-nav', onForm);
+  for (const tab of document.querySelectorAll('.tab')) {
+    if (tab.dataset.screen === state.screen) tab.setAttribute('aria-current', 'page');
     else tab.removeAttribute('aria-current');
   }
 }
 
-/** Redraws every screen that shows entries (cheap at this app's size). */
+/** Redraws the screen showing now (cheap at this app's size). */
 function renderAll() {
   renderScreen(state.screen);
 }
@@ -914,35 +1041,48 @@ function renderScreen(name) {
   if (name === 'overview') renderOverview();
   if (name === 'history') renderHistory();
   if (name === 'settings') renderSettings();
+  if (name === 'form') setChildren($('form-demo-banner'), demoBanner());
 }
 
 /**
- * The offline banner: "No internet. Showing saved data." with Try Again.
- * Shown on Overview and History when the last refresh failed.
+ * The amber notice on top of every screen in the demo, with a way to sign in.
+ */
+function demoBanner() {
+  if (!state.demo) return null;
+  return h('div', { class: 'banner banner-warning screen-banner demo-banner', role: 'status' },
+    h('span', { class: 'banner-text' }, h('b', null, 'Demo mode.'), ' Sample data, cleared when you leave.'),
+    h('button', { type: 'button', class: 'btn btn-primary btn-small', onclick: () => exitDemo('') }, 'Sign In'));
+}
+
+/**
+ * The offline banner: "No internet. Showing saved data." with Try Again, and
+ * when the data was last updated. Shown on Overview and History.
  */
 function offlineBanner() {
   if (!state.offline) return null;
-  return h('div', { class: 'banner banner-warning screen-banner', role: 'status' },
-    icon('offline', 20),
-    h('span', { class: 'banner-text' }, 'No internet. Showing saved data.'),
-    h('button', { type: 'button', class: 'btn btn-secondary btn-small', onclick: () => loadExpenses() }, 'Try Again'));
+  return [
+    h('div', { class: 'banner banner-warning screen-banner', role: 'status' },
+      icon('offline', 20),
+      h('span', { class: 'banner-text' }, 'No internet. Showing saved data.'),
+      h('button', { type: 'button', class: 'btn btn-secondary btn-small', onclick: () => loadExpenses() }, 'Try Again')),
+    h('p', { class: 'last-updated' }, lastUpdatedText()),
+  ];
 }
 
-/** "Last updated 8:15 today" (or with the date), from state.lastSync. */
+/** "Last updated 8:15 am today" (or with the date), from state.lastSync. */
 function lastUpdatedText() {
   if (!state.lastSync) return 'Not updated yet';
   const d = new Date(state.lastSync);
-  const time = d.getHours() + ':' + pad2(d.getMinutes());
   const day = toDateText(d) === today() ? 'today' : formatDay(toDateText(d));
-  return 'Last updated ' + time + ' ' + day;
+  return 'Last updated ' + formatTime(pad2(d.getHours()) + ':' + pad2(d.getMinutes())) + ' ' + day;
 }
 
 /**
- * Draws Overview for state.period (a day, month or year):
- * a comparison with the period before, the total with averages, the biggest
- * day, the "This week" strip, spending by category, recent entries, and
- * Download Statement. Also its empty, loading and offline states.
- * Everything is calculated on the phone from entries already loaded.
+ * Draws Overview for state.period (a day, month or year): the total with
+ * averages, a card comparing it with the period before plus the biggest day,
+ * the "This Week" strip, spending by category, recent entries, and Download
+ * Statement. Also its empty, loading and offline states. Everything is
+ * calculated on the phone from entries already loaded.
  */
 function renderOverview() {
   const screen = $('screen-overview');
@@ -957,50 +1097,51 @@ function renderOverview() {
       type: 'button', class: 'btn btn-secondary btn-icon head-button',
       'aria-label': 'Choose period. Showing ' + periodLabel(period),
       onclick: () => openPeriodSheet({ types: ['day', 'month', 'year'], value: period, onChoose: setOverviewPeriod }),
-    }, icon('calendar', 22)) : null);
+    }, icon('calendar', 20)) : null);
 
   // Loading: placeholder shapes in the same layout as the real cards,
   // so nothing jumps when the data arrives.
   if (!state.hasLoaded) {
-    setChildren(screen, head,
+    setChildren(screen, head, demoBanner(),
       h('p', { class: 'visually-hidden', role: 'status' }, 'Loading your spending'),
-      h('div', { class: 'skeleton', style: 'height:300px;margin:0 14px 20px', 'aria-hidden': 'true' }),
-      h('div', { class: 'skeleton', style: 'height:230px;margin:0 14px 20px', 'aria-hidden': 'true' }),
-      h('div', { class: 'skeleton', style: 'height:180px;margin:0 14px', 'aria-hidden': 'true' }));
+      h('div', { class: 'skeleton', style: 'height:210px;margin:0 12px 14px', 'aria-hidden': 'true' }),
+      h('div', { class: 'skeleton', style: 'height:170px;margin:0 12px 14px', 'aria-hidden': 'true' }),
+      h('div', { class: 'skeleton', style: 'height:200px;margin:0 12px', 'aria-hidden': 'true' }));
     return;
   }
 
   // New user: nothing added yet.
   if (!all.length) {
-    setChildren(screen, head, offlineBanner(),
+    setChildren(screen, head, demoBanner(), offlineBanner(),
       h('div', { class: 'empty' },
         h('h2', { class: 'title' }, 'Your Overview', h('span', { class: 'sub' }, 'Starts Here.')),
         h('p', { class: 'caption' }, 'Add your first expense to see charts.'),
-        h('button', { type: 'button', class: 'btn btn-primary btn-medium', onclick: openAddForm },
-          icon('plus', 20, 2.4), 'Add Expense')));
+        h('button', { type: 'button', class: 'btn btn-primary', onclick: openAddForm }, icon('plus', 20, 2.4), 'Add Expense')));
     return;
   }
 
   // A period with no entries.
   if (!entries.length) {
-    const words = period.type === 'day' ? 'on ' + formatDay(period.value) :
-      period.type === 'year' ? 'in ' + period.value : 'in ' + formatMonthShort(period.value) + '.';
-    const current = currentPeriod(period.type);
-    setChildren(screen, head, offlineBanner(),
+    const words = period.type === 'day' ? 'on ' + formatDay(period.value) + '.' :
+      period.type === 'year' ? 'in ' + period.value + '.' : 'in ' + formatMonthShort(period.value) + '.';
+    const nothing = period.type === 'day' ? 'Nothing was added on ' + formatDay(period.value) + '.' :
+      'Nothing was added for ' + (period.type === 'year' ? period.value : formatMonthShort(period.value)) + '.';
+    setChildren(screen, head, demoBanner(), offlineBanner(),
       h('div', { class: 'empty' },
-        h('div', { class: 'empty-icon glass' }, icon('calendar', 40, 1.8)),
+        h('div', { class: 'empty-icon glass' }, icon('calendar', 36, 1.8)),
         h('h2', { class: 'title' }, 'No Spending', h('span', { class: 'sub' }, words)),
+        h('p', { class: 'caption' }, nothing),
         periodHasToday(period) ? null : h('button', {
-          type: 'button', class: 'btn btn-secondary btn-medium',
-          onclick: () => setOverviewPeriod(current),
+          type: 'button', class: 'btn btn-secondary',
+          onclick: () => setOverviewPeriod(currentPeriod(period.type)),
         }, 'Go to This ' + (period.type === 'day' ? 'Day' : period.type === 'year' ? 'Year' : 'Month'))));
     return;
   }
 
-  setChildren(screen, head, offlineBanner(), overviewHero(entries), overviewWeek(),
-    overviewCategories(entries), overviewRecent(entries),
+  setChildren(screen, head, demoBanner(), offlineBanner(), overviewHero(entries), overviewPeriodCard(entries),
+    overviewWeek(), overviewCategories(entries), overviewRecent(entries),
     h('button', { type: 'button', class: 'btn btn-secondary statement-button', onclick: () => openStatementSheet(statementMonthFor(period)) },
-      icon('download', 20, 2.2), 'Download Statement'));
+      icon('download', 18, 2.2), 'Download Statement'));
   restoreFocus(screen);
 }
 
@@ -1011,74 +1152,91 @@ function setOverviewPeriod(period) {
   renderOverview();
 }
 
-/**
- * The stacked cards at the top: the comparison peeks out behind the total.
- * Offline, the comparison is replaced by when the data was last updated.
- */
+/** The total for the period, its average and entries, and Add Expense. */
 function overviewHero(entries) {
   const period = state.period;
   const total = sumAmounts(entries);
-  const stack = h('div', { class: 'hero-stack' });
-
-  // Comparison with the period before.
-  const before = previousPeriod(period);
-  const beforeTotal = sumAmounts(state.expenses.filter((e) => inPeriod(e.date, before)));
-  let compare = null;
-  if (state.offline) {
-    compare = h('div', { class: 'compare glass' }, h('span', null, lastUpdatedText()));
-  } else if (beforeTotal > 0) {
-    const diff = Math.round((total - beforeTotal) * 100) / 100;
-    const name = period.type === 'month' ? MONTHS[parseDate(before.value + '-01').getMonth()] :
-      period.type === 'day' ? (before.value === addDays(today(), -1) ? 'yesterday' : formatDay(before.value)) : before.value;
-    compare = h('div', { class: 'compare glass' },
-      h('span', null, 'Compared with ' + name),
-      diff === 0 ? h('span', { class: 'change' }, 'The same') :
-        h('span', { class: 'change' }, icon(diff < 0 ? 'arrowDown' : 'arrowUp', 18, 2.4),
-          rm(Math.abs(diff)) + (diff < 0 ? ' less' : ' more')));
-  }
-  if (compare) stack.append(compare);
-
-  // The total, with averages and the Add Expense button.
   const label = period.type === 'day' ? 'Spent on ' + formatDay(period.value) :
-    period.type === 'year' ? 'Spent in ' + period.value : 'Spent This Month';
-  const stats = [];
+    period.type === 'year' ? 'Spent in ' + period.value :
+    periodHasToday(period) ? 'Spent This Month' : 'Spent in ' + MONTHS[Number(period.value.slice(5)) - 1];
+
   // Averages count only days (or months) that have spending, so one RM 52
   // entry shows RM 52.00, not RM 52 spread over every day of the month.
+  const stats = [];
   if (period.type === 'month') {
-    const days = new Set(entries.map((e) => e.date)).size;
-    stats.push(['Daily Average', rm(total / days)]);
+    stats.push(['Daily Average', rm(total / new Set(entries.map((e) => e.date)).size)]);
   } else if (period.type === 'year') {
-    const months = new Set(entries.map((e) => e.date.slice(0, 7))).size;
-    stats.push(['Monthly Average', rm(total / months)]);
+    stats.push(['Monthly Average', rm(total / new Set(entries.map((e) => e.date.slice(0, 7))).size)]);
   } else {
     stats.push(['Largest', rm(Math.max(...entries.map((e) => e.amount)))]);
   }
   stats.push(['Entries', String(entries.length)]);
 
-  const todayTotal = sumAmounts(state.expenses.filter((e) => e.date === today()));
   const showToday = period.type !== 'day' && periodHasToday(period);
-  const hero = h('div', { class: 'hero' + (compare ? '' : ' alone') },
+  return h('div', { class: 'hero' },
     h('div', null,
       h('p', { class: 'hero-label' }, label),
       h('p', { class: 'big-amount' }, h('span', { class: 'currency' }, 'RM'), amountNumber(total))),
     h('div', { class: 'hero-stats' }, stats.map(([k, v]) =>
       h('div', null, h('p', { class: 'stat-label' }, k), h('p', { class: 'stat-value' }, v)))),
     h('div', { class: 'hero-foot' },
-      h('button', { type: 'button', class: 'btn btn-primary btn-medium', onclick: openAddForm }, icon('plus', 20, 2.4), 'Add Expense'),
-      showToday ? h('div', { class: 'today' }, h('p', { class: 'stat-label' }, 'Today'), h('p', { class: 'stat-value' }, rm(todayTotal))) : null));
-  stack.append(hero);
+      h('button', { type: 'button', class: 'btn btn-primary', onclick: openAddForm }, icon('plus', 20, 2.4), 'Add Expense'),
+      showToday ? h('div', { class: 'today' }, h('p', { class: 'stat-label' }, 'Today'),
+        h('p', { class: 'stat-value' }, rm(sumAmounts(state.expenses.filter((e) => e.date === today()))))) : null));
+}
 
-  // The biggest day of the month or year.
+/**
+ * "This Month" (or This Year / the day): how it compares with the period
+ * before, as a coloured label (green less, grey no change, red more) with
+ * that period's total, and the biggest day. Rows with nothing to compare are
+ * left out; the label wraps rather than overflowing for very large amounts.
+ */
+function overviewPeriodCard(entries) {
+  const period = state.period;
+  const isNow = periodHasToday(period);
+  const total = sumAmounts(entries);
+  let title;
+  let range = '';
+  if (period.type === 'month') {
+    const m = Number(period.value.slice(5)) - 1;
+    title = isNow ? 'This Month' : MONTHS[m];
+    range = '1 to ' + (isNow ? parseDate(today()).getDate() : daysInMonth(period.value)) + ' ' + MONTHS[m].slice(0, 3);
+  } else if (period.type === 'year') {
+    title = isNow ? 'This Year' : period.value;
+    range = 'Jan to ' + (isNow ? MONTHS[new Date().getMonth()].slice(0, 3) : 'Dec');
+  } else {
+    title = isNow ? 'Today' : formatDayLong(period.value);
+  }
+
+  const facts = [];
+  const before = previousPeriod(period);
+  const beforeTotal = sumAmounts(state.expenses.filter((e) => inPeriod(e.date, before)));
+  if (beforeTotal > 0) {
+    const name = period.type === 'month' ? MONTHS[Number(before.value.slice(5)) - 1] :
+      period.type === 'year' ? before.value :
+      before.value === addDays(today(), -1) ? 'yesterday' : formatDay(before.value);
+    const diff = Math.round((total - beforeTotal) * 100) / 100;
+    const kind = diff < 0 ? 'less' : diff > 0 ? 'more' : 'same';
+    const words = kind === 'same' ? 'No change' : rm(Math.abs(diff)) + ' ' + kind;
+    facts.push(h('div', { class: 'fact' },
+      h('p', { class: 'fact-label' }, 'Compared with ' + name),
+      h('p', { class: 'change-pill is-' + kind }, icon(kind === 'less' ? 'arrowDown' : kind === 'more' ? 'arrowUp' : 'equals', 16, 2.4), words),
+      h('p', { class: 'fact-label' }, name[0].toUpperCase() + name.slice(1) + ' total: ' + rm(beforeTotal))));
+  }
   if (period.type !== 'day') {
     const byDay = totalsByDay(entries);
     const days = Object.keys(byDay);
     if (days.length > 1) {
       const biggest = days.reduce((a, b) => (byDay[b] > byDay[a] ? b : a));
-      stack.append(h('div', { class: 'biggest glass' }, 'Biggest Day',
-        h('strong', null, formatDay(biggest) + ', ' + rm(byDay[biggest]))));
+      facts.push(h('div', { class: 'fact' },
+        h('p', { class: 'fact-label' }, 'Biggest Day'),
+        h('p', { class: 'fact-value' }, h('strong', null, rm(byDay[biggest])), ' on ' + formatDay(biggest))));
     }
   }
-  return stack;
+  if (!facts.length) return null;
+  return h('section', { class: 'card glass', 'aria-labelledby': 'period-card-title' },
+    h('div', { class: 'card-head' }, h('h2', { class: 'section-title', id: 'period-card-title' }, title), range ? h('span', { class: 'caption' }, range) : null),
+    h('div', { class: 'panel facts' }, facts));
 }
 
 /** {'2026-11-21': 46.3, ...}: the total for each day that has entries. */
@@ -1090,7 +1248,7 @@ function totalsByDay(entries) {
 }
 
 /**
- * "This week": seven tall day buttons, Monday to Sunday, each with a bar as
+ * "This Week": seven tall day buttons, Monday to Sunday, each with a bar as
  * tall as that day's spending. Tap a day to see its total underneath.
  * Shown for a month (the week of today, or the month's last week) or a day.
  */
@@ -1108,14 +1266,13 @@ function overviewWeek() {
   const buttons = days.map((day) => {
     const total = byDay[day] || 0;
     const future = day > today();
-    const height = total > 0 ? Math.round(8 + (total / max) * 64) : 0;
+    const height = total > 0 ? Math.round(8 + (total / max) * 48) : 0;
     const d = parseDate(day);
     return h('button', {
       type: 'button',
       class: 'day',
       'aria-pressed': String(day === chosen),
-      'aria-label': WEEKDAYS[d.getDay()] + ' ' + d.getDate() + ' ' + MONTHS[d.getMonth()] + ', ' +
-        (future ? 'not yet' : rm(total)),
+      'aria-label': WEEKDAYS[d.getDay()] + ' ' + d.getDate() + ' ' + MONTHS[d.getMonth()] + ', ' + (future ? 'not yet' : rm(total)),
       disabled: future,
       'data-key': 'day-' + day,
       onclick: () => { state.weekDay = day; keepFocus('day-' + day); renderOverview(); },
@@ -1131,15 +1288,16 @@ function overviewWeek() {
     ? first.getDate() + ' to ' + last.getDate() + ' ' + MONTHS[last.getMonth()].slice(0, 3)
     : first.getDate() + ' ' + MONTHS[first.getMonth()].slice(0, 3) + ' to ' + last.getDate() + ' ' + MONTHS[last.getMonth()].slice(0, 3);
 
-  return h('section', { class: 'week glass', 'aria-labelledby': 'week-title' },
-    h('div', { class: 'week-head' }, h('h2', { class: 'section-title', id: 'week-title' }, 'This Week'), h('span', { class: 'caption' }, range)),
-    h('div', { class: 'week-days' }, buttons),
-    h('div', { class: 'week-foot', 'aria-live': 'polite' },
-      h('span', null, formatDayLong(chosen)), h('span', { class: 'amount' }, rm(byDay[chosen] || 0))));
+  return h('section', { class: 'card glass', 'aria-labelledby': 'week-title' },
+    h('div', { class: 'card-head' }, h('h2', { class: 'section-title', id: 'week-title' }, 'This Week'), h('span', { class: 'caption' }, range)),
+    h('div', { class: 'panel' },
+      h('div', { class: 'week-days' }, buttons),
+      h('div', { class: 'week-foot', 'aria-live': 'polite' },
+        h('p', { class: 'fact-label' }, formatDayLong(chosen)), h('p', { class: 'amount' }, rm(byDay[chosen] || 0)))));
 }
 
 /**
- * "Where it went": the three biggest categories as coloured tiles (the
+ * "Where It Went": the three biggest categories as coloured tiles (the
  * largest one tall), then the rest as a list. Each shows its share as a
  * number, so nothing depends on colour alone.
  */
@@ -1169,12 +1327,12 @@ function overviewCategories(entries) {
 /** "Recent": the latest five entries in the period, with See All. */
 function overviewRecent(entries) {
   const month = statementMonthFor(state.period);
-  return h('section', { 'aria-labelledby': 'recent-title' },
-    h('div', { class: 'block-head' },
+  return h('section', { class: 'card glass', 'aria-labelledby': 'recent-title' },
+    h('div', { class: 'card-head', style: 'align-items:center;padding-top:4px;padding-bottom:4px' },
       h('h2', { class: 'section-title', id: 'recent-title' }, 'Recent'),
-      h('button', { type: 'button', class: 'btn btn-secondary btn-small', onclick: () => { state.historyMonth = month; showScreen('history'); } }, 'See All')),
-    h('div', { class: 'card glass' }, h('ul', { class: 'panel rows' },
-      entries.slice(0, 5).map((e) => h('li', { class: 'row' },
+      h('button', { type: 'button', class: 'link-button', onclick: () => { state.historyMonth = month; showScreen('history'); } }, 'See All')),
+    h('ul', { class: 'panel rows' },
+      entries.slice(0, 5).map((e) => h('li', null, h('div', { class: 'row' },
         categoryTile(e.category),
         h('div', { class: 'row-main' }, h('p', { class: 'row-title' }, e.category),
           h('p', { class: 'row-note' }, e.note || formatDay(e.date))),
@@ -1192,7 +1350,7 @@ function statementMonthFor(period) {
 // ===========================================================================
 
 /**
- * Opens "Choose period". options.types lists the tabs to offer ('day',
+ * Opens "Choose Period". options.types lists the tabs to offer ('day',
  * 'month', 'year'); options.value is the current period; options.onChoose
  * gets the chosen period. Future dates are dashed and can't be chosen, and
  * the confirm button names exactly what will show.
@@ -1209,7 +1367,7 @@ function openPeriodSheet(options) {
   openSheet();
 }
 
-/** Draws the Choose period pop-up for the picker's current tab. */
+/** Draws the Choose Period pop-up for the picker's current tab. */
 function renderPeriodSheet(picker) {
   const redraw = () => renderPeriodSheet(picker);
   const nowYear = Number(today().slice(0, 4));
@@ -1291,14 +1449,18 @@ function renderPeriodSheet(picker) {
 /** The "‹ 2026 ›" row at the top of a picker. */
 function pickerNav(label, canGoBack, canGoForward, move, unit) {
   return h('div', { class: 'picker-nav' },
-    h('button', { type: 'button', class: 'btn btn-secondary btn-icon btn-small', 'aria-label': 'Previous ' + unit, disabled: !canGoBack, 'data-key': 'prev', onclick: () => { keepFocus('prev'); move(-1); } }, icon('back', 20, 2.4)),
+    h('button', { type: 'button', class: 'btn btn-secondary btn-icon', 'aria-label': 'Previous ' + unit, disabled: !canGoBack, 'data-key': 'prev', onclick: () => { keepFocus('prev'); move(-1); } }, icon('back', 20, 2.4)),
     h('span', { class: 'label', 'aria-live': 'polite' }, label),
-    h('button', { type: 'button', class: 'btn btn-secondary btn-icon btn-small', 'aria-label': 'Next ' + unit, disabled: !canGoForward, 'data-key': 'next', onclick: () => { keepFocus('next'); move(1); } }, icon('next', 20, 2.4)));
+    h('button', { type: 'button', class: 'btn btn-secondary btn-icon', 'aria-label': 'Next ' + unit, disabled: !canGoForward, 'data-key': 'next', onclick: () => { keepFocus('next'); move(1); } }, icon('next', 20, 2.4)));
 }
 
 // ===========================================================================
 // 10. Add and Edit expense
 // ===========================================================================
+//
+// The form asks in the order people remember a purchase: how much, when,
+// what it was (note and receipt), then the category. Amount and category are
+// required (red asterisk). The tab bar is hidden while it's open.
 
 /** Wires up the form's fixed parts once: chips, date, note, photo, buttons. */
 function setUpForm() {
@@ -1307,7 +1469,7 @@ function setUpForm() {
     chips.append(h('button', {
       type: 'button', class: 'chip', role: 'radio', 'aria-checked': 'false', 'data-cat': name, 'data-value': name,
       tabindex: '-1', onclick: () => selectCategory(name, true),
-    }, icon(name, 20), name));
+    }, icon(name, 18), name));
   }
   // Arrow keys move between chips, as in any radio group.
   chips.addEventListener('keydown', (event) => {
@@ -1318,16 +1480,15 @@ function setUpForm() {
     selectCategory(CATEGORIES[(current + keys[event.key] + CATEGORIES.length) % CATEGORIES.length], true);
   });
 
-  $('amount').addEventListener('input', () => { setAmountError(false); updateSaveLabel(); });
-  $('note').addEventListener('input', updateNoteCount);
-  $('date').addEventListener('change', updateDateLabel);
-  $('date-change').addEventListener('click', openDatePicker);
-  $('details-toggle').addEventListener('click', () => setDetailsOpen($('details-open').hidden));
+  $('amount').addEventListener('input', () => setAmountError(false));
+  $('when').addEventListener('change', () => { if (state.form) state.form.whenChanged = true; updateWhenLabel(); });
+  $('when-change').addEventListener('click', openWhenPicker);
+  $('category-row').addEventListener('click', () => setCategoryChipsOpen($('category-chips').hidden));
   $('photo-add').addEventListener('click', () => $('photo-input').click());
   $('photo-replace').addEventListener('click', () => $('photo-input').click());
   $('photo-remove').addEventListener('click', removeFormPhoto);
   $('photo-input').addEventListener('change', handlePhotoChosen);
-  $('form-cancel').addEventListener('click', cancelEdit);
+  $('form-back').addEventListener('click', formBack);
   $('expense-form').addEventListener('submit', (event) => {
     event.preventDefault(); // stop the browser reloading the page
     if (state.form.mode === 'edit') saveEdit();
@@ -1335,59 +1496,56 @@ function setUpForm() {
   });
 }
 
-/** Opens Add Expense, empty, dated today, with the last category used. */
+/** Opens Add Expense, empty, dated now, with the last category used. */
 function openAddForm() {
-  state.form = { mode: 'add', photo: null, saving: false };
+  state.form = { mode: 'add', photo: null, saving: false, failed: false, whenChanged: false };
   let last = 'Food';
   try { last = localStorage.getItem(LAST_CATEGORY_KEY) || 'Food'; } catch (err) { /* ignore */ }
-  fillForm({ amount: '', category: CATEGORIES.includes(last) ? last : 'Food', date: today(), note: '' });
-  $('form-top').hidden = true;
+  fillForm({ amount: '', category: CATEGORIES.includes(last) ? last : 'Food', date: today(), time: currentTime(), note: '' });
   $('form-title').firstChild.textContent = 'Add Expense ';
-  $('details-toggle').hidden = false;
-  setDetailsOpen(false);
+  $('category-row-wrap').hidden = true;
+  setCategoryChipsOpen(true);
   showPhoto(null);
   showScreen('form');
   $('amount').focus();
 }
 
 /**
- * Opens Edit Expense for a saved entry: a full-screen form with no tab bar,
- * so it's clear you're in the middle of a task. Delete stays in History,
- * away from Save.
+ * Opens Edit Expense for a saved entry. Delete stays in History, away from
+ * Save. The category shows as one row; tap it to change.
  */
 function openEditForm(id) {
   const expense = findExpense(id);
   if (!expense || expense.status) return;
-  state.form = { mode: 'edit', id, original: { ...expense }, photo: { state: 'keep' }, saving: false };
-  fillForm({ amount: amountNumber(expense.amount).replace(/,/g, ''), category: expense.category, date: expense.date, note: expense.note });
-  $('form-top').hidden = false;
+  state.form = { mode: 'edit', id, original: { ...expense }, photo: { state: 'keep' }, saving: false, failed: false, whenChanged: false };
+  fillForm({ amount: amountNumber(expense.amount).replace(/,/g, ''), category: expense.category, date: expense.date, time: expense.time || '', note: expense.note });
   $('form-title').firstChild.textContent = 'Edit Expense ';
   $('form-subtitle').textContent = expense.category + ', ' + formatDay(expense.date);
-  $('details-toggle').hidden = true;
-  setDetailsOpen(true);
+  $('category-row-wrap').hidden = false;
+  setCategoryChipsOpen(false);
   showPhoto(null);
   if (expense.hasReceipt) {
+    showPhoto('');
     getReceiptSrc(id).then((src) => {
       if (state.form && state.form.id === id && state.form.photo.state === 'keep') showPhoto(src);
     }).catch(() => { /* the thumbnail stays a placeholder */ });
-    showPhoto('');
   }
   showScreen('form');
 }
 
 /** Puts values into the form and resets messages. */
 function fillForm(values) {
+  state.form.time = values.time;
   $('amount').value = values.amount;
   $('note').value = values.note || '';
-  $('date').value = values.date;
-  $('date').max = today();
+  $('when').value = values.date + 'T' + (values.time || '12:00');
+  $('when').max = today() + 'T23:59';
   selectCategory(values.category, false);
   setAmountError(false);
   $('form-banner').hidden = true;
   $('photo-input').value = '';
   $('save-button').disabled = false;
-  updateNoteCount();
-  updateDateLabel();
+  updateWhenLabel();
   updateSaveLabel();
 }
 
@@ -1399,7 +1557,15 @@ function selectCategory(name, focus) {
     chip.tabIndex = on ? 0 : -1;
     if (on && focus) chip.focus();
   }
-  updateSaveLabel();
+  const value = $('category-value');
+  value.dataset.cat = name;
+  setChildren(value, icon(name, 18), name);
+}
+
+/** Edit only: shows or hides the chips under the category row. */
+function setCategoryChipsOpen(open) {
+  $('category-chips').hidden = !open;
+  $('category-row').setAttribute('aria-expanded', String(open));
 }
 
 /** The category chosen in the form. */
@@ -1419,44 +1585,45 @@ function readAmount() {
   return amount > 0 && amount <= MAX_AMOUNT ? amount : null;
 }
 
-/** The Save button says exactly what happens: "Save RM 8.40". */
-function updateSaveLabel() {
-  const button = $('save-button');
-  if (!state.form) return;
-  setChildren(button);
-  if (state.form.saving) {
-    button.append('Saving…');
-  } else if (state.form.mode === 'edit') {
-    button.append(icon('check', 20, 2.6), 'Save Changes');
-  } else {
-    const amount = readAmount();
-    button.append(amount ? 'Save ' + rm(amount) : 'Save');
-  }
+/**
+ * The date and time chosen. When editing an older entry that has no time,
+ * it stays without one unless the user changes the date or time.
+ */
+function readWhen() {
+  const [date, time] = ($('when').value || today() + 'T' + currentTime()).split('T');
+  const keepNoTime = state.form && state.form.mode === 'edit' && !state.form.whenChanged && !state.form.time;
+  return { date, time: keepNoTime ? '' : time.slice(0, 5) };
 }
 
-/** Shows or hides "Type an amount first." with the red outline. */
+/** "Today, 9:41 am" in the form, and the long date under the title when adding. */
+function updateWhenLabel() {
+  const { date, time } = readWhen();
+  $('when-label').textContent = whenLabel(date, time, state.form && state.form.mode === 'edit');
+  if (state.form && state.form.mode === 'add') $('form-subtitle').textContent = formatDayLong(date);
+}
+
+/** The Save button says what happens: Record Expense, Save Changes or Try Again. */
+function updateSaveLabel() {
+  const form = state.form;
+  if (!form) return;
+  if (form.saving) setChildren($('save-button'), 'Saving…');
+  else if (form.mode === 'add') setChildren($('save-button'), 'Record Expense');
+  else if (form.failed) setChildren($('save-button'), icon('retry', 20, 2.4), 'Try Again');
+  else setChildren($('save-button'), icon('check', 20, 2.6), 'Save Changes');
+}
+
+/** Shows or hides "Type an amount first." with the red outline and label. */
 function setAmountError(on, message) {
   $('amount-panel').classList.toggle('is-invalid', on);
+  $('amount-label').classList.toggle('is-invalid-label', on);
   $('amount').setAttribute('aria-invalid', String(on));
   $('amount-error').hidden = !on;
-  if (message) $('amount-error').textContent = message;
+  if (message) $('amount-error-text').textContent = message;
 }
 
-/** "12 of 200" under the note. */
-function updateNoteCount() {
-  $('note-count').textContent = $('note').value.length + ' of ' + MAX_NOTE_LENGTH;
-}
-
-/** "Today", "Yesterday" or "Sat, 21 Nov", plus the long date under the title. */
-function updateDateLabel() {
-  const value = $('date').value || today();
-  $('date-label').textContent = value === today() ? 'Today' : value === addDays(today(), -1) ? 'Yesterday' : formatDay(value);
-  if (state.form && state.form.mode === 'add') $('form-subtitle').textContent = formatDayLong(value);
-}
-
-/** Opens the phone's date picker; older browsers show the date box instead. */
-function openDatePicker() {
-  const input = $('date');
+/** Opens the phone's date-and-time picker; older browsers show the box instead. */
+function openWhenPicker() {
+  const input = $('when');
   try {
     input.showPicker();
   } catch (err) {
@@ -1465,13 +1632,6 @@ function openDatePicker() {
     input.tabIndex = 0;
     input.focus();
   }
-}
-
-/** Opens or closes the "Note or Photo" part of the Add form. */
-function setDetailsOpen(open) {
-  $('details-open').hidden = !open;
-  $('details-toggle').setAttribute('aria-expanded', String(open));
-  setChildren($('details-chevron'), icon(open ? 'up' : 'down', 20));
 }
 
 /**
@@ -1487,28 +1647,58 @@ function readForm() {
     $('amount').focus();
     return null;
   }
-  const category = formCategory();
-  const date = $('date').value;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date > today()) {
-    showFormBanner('Choose a date that is today or earlier.');
+  const { date, time } = readWhen();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date > today() || (date === today() && time > currentTime())) {
+    showFormBanner('Choose a date and time that have already passed.');
     return null;
   }
   const note = $('note').value.trim().slice(0, MAX_NOTE_LENGTH);
-  return { amount, category, date, note };
+  return { amount, category: formCategory(), date, time, note };
 }
 
-/** Shows a red message at the top of the form, optionally with Try Again. */
-function showFormBanner(message, retry) {
+/** Shows a red message above the Save button. */
+function showFormBanner(message) {
   const banner = $('form-banner');
-  setChildren(banner, icon('alert', 20), h('span', { class: 'banner-text' }, message),
-    retry ? h('button', { type: 'button', class: 'btn btn-secondary btn-small', onclick: retry }, 'Try Again') : null);
+  setChildren(banner, icon('alert', 20), h('span', { class: 'banner-text' }, message));
   banner.hidden = false;
-  banner.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  banner.scrollIntoView({ block: 'center' });
+}
+
+/** True if anything was typed or chosen on Add Expense. */
+function addFormHasInput() {
+  return Boolean($('amount').value.trim() || $('note').value.trim() || (state.form && state.form.photo));
 }
 
 /**
- * Add Expense → Save: the entry shows at once and saves in the background
- * (see saveExpense). The id is made here, so a retry can't make a duplicate.
+ * Back. On Add with something entered, asks first ("Leave Without Saving?");
+ * on Edit with changes, asks to discard them; otherwise just goes back.
+ */
+function formBack() {
+  if (state.form.mode === 'edit') return cancelEdit();
+  if (!addFormHasInput()) return leaveForm();
+  const amount = readAmount();
+  fillSheet(
+    h('h2', { class: 'sheet-title', id: 'sheet-title' }, 'Leave Without', h('span', { class: 'sub' }, 'Saving?')),
+    h('p', { class: 'sheet-message' }, "This expense hasn't been saved yet."),
+    h('div', { class: 'panel' },
+      h('div', { class: 'kv' }, h('span', { class: 'k' }, 'Amount'), h('span', { class: 'v' }, amount ? rm(amount) : '—')),
+      h('div', { class: 'kv' }, h('span', { class: 'k' }, 'Category'), h('span', { class: 'v' }, formCategory()))),
+    h('div', { class: 'sheet-actions' },
+      h('button', { type: 'button', class: 'btn btn-primary btn-block', onclick: closeSheet }, 'Keep Editing'),
+      h('button', { type: 'button', class: 'btn btn-secondary is-danger btn-block', onclick: () => { closeSheet(); leaveForm(); } }, 'Discard Entry')));
+  openSheet();
+}
+
+/** Leaves the form for the screen it was opened from. */
+function leaveForm() {
+  state.form = null;
+  showScreen(state.previousScreen || 'overview');
+}
+
+/**
+ * Add Expense → Record Expense: the entry shows at once and saves in the
+ * background (see saveExpense), and the app goes back where it came from.
+ * The id is made here, so a retry can't make a duplicate.
  */
 function saveNewExpense() {
   if (state.form.preparingPhoto) return showFormBanner('Wait a moment, the photo is still being prepared.');
@@ -1522,67 +1712,58 @@ function saveNewExpense() {
     status: 'saving',
   };
   if (state.form.photo) expense.receipt = state.form.photo;
-  try { localStorage.setItem(LAST_CATEGORY_KEY, values.category); } catch (err) { /* ignore */ }
+  if (!state.demo) {
+    try { localStorage.setItem(LAST_CATEGORY_KEY, values.category); } catch (err) { /* ignore */ }
+  }
 
   state.expenses.push(expense);
   sortExpenses();
   saveCache();
+  leaveForm();
   saveExpense(expense.id);
-
-  // Ready for the next one: same category and date, empty amount and note.
-  state.form.photo = null;
-  $('amount').value = '';
-  $('note').value = '';
-  showPhoto(null);
-  setDetailsOpen(false);
-  updateNoteCount();
-  updateSaveLabel();
   showToast('Saved ' + rm(expense.amount) + ' · ' + expense.category);
 }
 
-/** The edit form's current values, for comparing with the original. */
+/** What changed on the edit form, as [field, before, now] rows. */
 function editChanges() {
   const original = state.form.original;
   const amount = readAmount();
-  const now = { amount, category: formCategory(), date: $('date').value, note: $('note').value.trim() };
+  const { date, time } = readWhen();
+  const note = $('note').value.trim();
   const changes = [];
   if (amount !== original.amount) changes.push(['Amount', rm(original.amount), amount ? rm(amount) : '—']);
-  if (now.category !== original.category) changes.push(['Category', original.category, now.category]);
-  if (now.date !== original.date) changes.push(['Date', formatDay(original.date), formatDay(now.date)]);
-  if (now.note !== (original.note || '')) changes.push(['Note', original.note || '—', now.note || '—']);
+  if (formCategory() !== original.category) changes.push(['Category', original.category, formCategory()]);
+  if (date !== original.date || time !== (original.time || '')) {
+    changes.push(['Date', whenLabel(original.date, original.time, true), whenLabel(date, time, true)]);
+  }
+  if (note !== (original.note || '')) changes.push(['Note', original.note || '—', note || '—']);
   if (state.form.photo.state !== 'keep') changes.push(['Photo', original.hasReceipt ? 'Photo' : 'None', state.form.photo.state === 'remove' ? 'Removed' : 'New photo']);
   return changes;
 }
 
 /**
- * Edit → Cancel. With unsaved changes, asks first and shows exactly what
+ * Edit → Back. With unsaved changes, asks first and shows exactly what
  * changed; "Keep Editing" is the raised button, "Discard" a red glass pill.
  */
 function cancelEdit() {
   const changes = editChanges();
-  if (!changes.length) return leaveEdit();
+  if (!changes.length) return leaveForm();
   fillSheet(
     h('h2', { class: 'sheet-title', id: 'sheet-title' }, 'Discard', h('span', { class: 'sub' }, 'Changes?')),
-    h('div', { class: 'panel' }, changes.map(([field, before, now]) => h('div', null,
-      h('div', { class: 'kv' }, h('span', { class: 'k' }, field + ' Before'), h('span', { class: 'v' }, before)),
-      h('div', { class: 'kv' }, h('span', { class: 'k' }, 'Now'), h('span', { class: 'v' }, now))))),
+    h('div', { class: 'panel' }, changes.map(([field, before, now]) => [
+      h('div', { class: 'kv' }, h('span', { class: 'k' }, changes.length > 1 ? field + ' Before' : 'Before'), h('span', { class: 'v' }, before)),
+      h('div', { class: 'kv' }, h('span', { class: 'k' }, 'Now'), h('span', { class: 'v' }, now))])),
     h('div', { class: 'sheet-actions' },
       h('button', { type: 'button', class: 'btn btn-primary btn-block', onclick: closeSheet }, 'Keep Editing'),
-      h('button', { type: 'button', class: 'btn btn-secondary is-danger btn-block', onclick: () => { closeSheet(); leaveEdit(); } }, 'Discard')));
+      h('button', { type: 'button', class: 'btn btn-secondary is-danger btn-block', onclick: () => { closeSheet(); leaveForm(); } }, 'Discard')));
   openSheet();
-}
-
-/** Leaves the edit form for History. */
-function leaveEdit() {
-  state.form = null;
-  showScreen('history');
 }
 
 /**
  * Edit → Save Changes. Unlike adding, this waits for the server, so if it
- * fails the user stays on the form with their changes kept and Try Again.
- * Afterwards, "Changes saved · Undo" (Undo is offered when the photo didn't
- * change, since a replaced photo is already in the trash).
+ * fails the user stays on the form with their changes kept, and the button
+ * becomes Try Again. Afterwards, "Changes saved · Undo" (Undo is offered when
+ * the photo didn't change, since a replaced photo is already in the trash).
  */
 async function saveEdit() {
   const form = state.form;
@@ -1590,7 +1771,7 @@ async function saveEdit() {
   if (form.preparingPhoto) return showFormBanner('Wait a moment, the photo is still being prepared.');
   const values = readForm();
   if (!values) return;
-  if (!editChanges().length) return leaveEdit();
+  if (!editChanges().length) return leaveForm();
 
   form.saving = true;
   $('save-button').disabled = true;
@@ -1608,14 +1789,16 @@ async function saveEdit() {
     saveCache();
     const original = form.original;
     state.historyMonth = values.date.slice(0, 7);
-    leaveEdit();
+    state.form = null;
+    showScreen('history');
     showToast('Changes saved', form.photo.state === 'keep' ? { undo: () => undoEdit(original) } : {});
   } catch (err) {
     form.saving = false;
+    form.failed = true;
     $('save-button').disabled = false;
     updateSaveLabel();
     if (err.code === 'AUTH') return; // the sign-in screen is showing; the form is kept
-    showFormBanner(err.code === 'NETWORK' ? "Couldn't save. Your changes are kept here." : "Couldn't save: " + err.message, saveEdit);
+    showFormBanner(err.code === 'NETWORK' ? "Couldn't save. Your changes are kept here." : "Couldn't save: " + err.message);
   }
 }
 
@@ -1623,8 +1806,8 @@ async function saveEdit() {
 async function undoEdit(original) {
   hideToast();
   try {
-    const { id, date, amount, category, note } = original;
-    const result = await callApi('update', { expense: { id, date, amount, category, note } });
+    const { id, date, time, amount, category, note } = original;
+    const result = await callApi('update', { expense: { id, date, time: time || '', amount, category, note } });
     const index = state.expenses.findIndex((e) => e.id === id);
     if (index !== -1) state.expenses[index] = result.expense;
     state.recentlyEdited.delete(id);
@@ -1643,7 +1826,7 @@ async function undoEdit(original) {
 
 /**
  * Draws History for state.historyMonth: entries grouped under each day with
- * the day's total. Tap an entry for Receipt, Edit and Delete. "Edit" in the
+ * the day's total. Each entry shows Receipt, Edit and Delete. "Edit" in the
  * header switches to edit mode, where entries are chosen with checkboxes.
  */
 function renderHistory() {
@@ -1653,7 +1836,7 @@ function renderHistory() {
   const parts = [];
 
   if (state.selecting) {
-    const allChosen = entries.length > 0 && entries.every((e) => state.selected.has(e.id));
+    const allChosen = entries.length > 0 && entries.every((e) => e.status || state.selected.has(e.id));
     parts.push(h('div', { class: 'select-head' },
       h('button', { type: 'button', class: 'btn btn-secondary btn-small', onclick: stopSelecting }, 'Done'),
       h('button', { type: 'button', class: 'btn btn-secondary btn-small', onclick: () => toggleSelectAll(entries, allChosen) },
@@ -1667,23 +1850,24 @@ function renderHistory() {
         h('span', { class: 'sub' }, h('button', {
           type: 'button', class: 'month-button', 'aria-label': 'Choose month. Showing ' + formatMonth(month),
           onclick: () => openPeriodSheet({ types: ['month'], value: { type: 'month', value: month }, onChoose: (p) => { state.historyMonth = p.value; renderHistory(); } }),
-        }, formatMonthShort(month), icon('down', 26, 2.4)))),
+        }, formatMonthShort(month), icon('down', 22, 2.4)))),
       entries.some((e) => !e.status) ? h('button', { type: 'button', class: 'btn btn-secondary btn-small head-button', onclick: startSelecting },
-        icon('edit', 18, 2.2), 'Edit') : null));
+        icon('edit', 16, 2.2), 'Edit') : null));
   }
-  parts.push(offlineBanner());
+  parts.push(demoBanner(), offlineBanner());
 
   if (!state.hasLoaded) {
     parts.push(h('p', { class: 'visually-hidden', role: 'status' }, 'Loading your entries'),
-      h('div', { class: 'skeleton', style: 'height:220px;margin:0 14px 16px', 'aria-hidden': 'true' }),
-      h('div', { class: 'skeleton', style: 'height:150px;margin:0 14px', 'aria-hidden': 'true' }));
+      h('div', { class: 'skeleton', style: 'height:200px;margin:0 12px 14px', 'aria-hidden': 'true' }),
+      h('div', { class: 'skeleton', style: 'height:140px;margin:0 12px', 'aria-hidden': 'true' }));
   } else if (!entries.length) {
     const isNow = month === currentMonth();
     parts.push(h('div', { class: 'empty' },
-      h('div', { class: 'empty-icon glass' }, icon('receipt', 40, 1.8)),
+      h('div', { class: 'empty-icon glass' }, icon('receipt', 36, 1.8)),
       h('h2', { class: 'title' }, 'No Entries', h('span', { class: 'sub' }, isNow ? 'Yet This Month.' : 'in ' + formatMonthShort(month) + '.')),
-      isNow ? h('button', { type: 'button', class: 'btn btn-primary btn-medium', onclick: openAddForm }, icon('plus', 20, 2.4), 'Add Expense')
-        : h('button', { type: 'button', class: 'btn btn-secondary btn-medium', onclick: () => { state.historyMonth = currentMonth(); renderHistory(); } }, 'Go to This Month')));
+      h('p', { class: 'caption' }, isNow ? 'Add your first expense for ' + MONTHS[Number(month.slice(5)) - 1] + '.' : 'Nothing was added for ' + formatMonthShort(month) + '.'),
+      isNow ? h('button', { type: 'button', class: 'btn btn-primary', onclick: openAddForm }, icon('plus', 20, 2.4), 'Add Expense')
+        : h('button', { type: 'button', class: 'btn btn-secondary', onclick: () => { state.historyMonth = currentMonth(); renderHistory(); } }, 'Go to This Month')));
   } else {
     const days = [...new Set(entries.map((e) => e.date))];
     for (const day of days) {
@@ -1694,60 +1878,60 @@ function renderHistory() {
         dayEntries.map((e) => (state.selecting ? historySelectRow(e) : historyRow(e))))));
     }
   }
-  setChildren(screen, ...parts.filter(Boolean));
+  setChildren(screen, ...parts);
   updateSelectBar();
   restoreFocus(screen);
 }
 
-/** One entry in History: tap to show its buttons; status underneath. */
+/** One entry in History, with its status and its Receipt / Edit / Delete buttons. */
 function historyRow(expense) {
-  const open = state.expandedId === expense.id;
-  const item = h('li', null,
-    h('button', {
-      type: 'button', class: 'row row-button', 'aria-expanded': String(open), 'data-key': 'row-' + expense.id,
-      onclick: () => { state.expandedId = open ? null : expense.id; keepFocus('row-' + expense.id); renderHistory(); },
-    },
-    categoryTile(expense.category),
-    h('span', { class: 'row-main' },
-      h('span', { class: 'row-title', style: 'display:block' }, expense.category),
-      expense.note ? h('span', { class: 'row-note', style: 'display:block' }, expense.note) : null,
-      state.recentlyEdited.has(expense.id) ? h('span', { class: 'tag' }, icon('edit', 14, 2.4), 'Edited just now') : null),
-    h('span', { class: 'row-amount' }, rm(expense.amount))));
+  const status = expense.status;
+  const del = h('button', {
+    type: 'button', class: 'text-action is-danger',
+    'aria-label': 'Delete ' + expense.category + ', ' + rm(expense.amount),
+    onclick: () => deleteWithUndo([expense.id], expense.category + ' ' + rm(expense.amount) + ' deleted'),
+  }, icon('trash', 16, 2.2), 'Delete');
 
-  if (expense.status === 'saving') {
-    item.append(h('p', { class: 'row-status', style: 'padding:0 16px 12px 72px;margin:0' }, icon('clock', 18), 'Saving'));
-  } else if (expense.status === 'failed') {
-    item.append(h('div', { class: 'row-status is-failed', style: 'padding:0 16px 12px 72px;margin:0' },
-      icon('alert', 18), h('span', { style: 'flex:1' }, 'Not saved. ' + (expense.error || '')),
-      h('button', { type: 'button', class: 'btn btn-secondary btn-small', onclick: () => saveExpense(expense.id) }, icon('retry', 18), 'Try Again')));
+  let foot;
+  if (status === 'saving') {
+    foot = h('div', { class: 'row-foot' }, h('span', { class: 'row-status' }, icon('clock', 16), 'Saving'));
+  } else if (status === 'failed') {
+    foot = h('div', { class: 'row-foot' },
+      h('span', { class: 'row-status is-failed' }, 'Not saved'), h('span', { class: 'grow' }), del,
+      h('button', { type: 'button', class: 'btn btn-primary btn-small', onclick: () => saveExpense(expense.id) }, 'Try Again'));
+  } else {
+    foot = h('div', { class: 'row-foot' },
+      expense.hasReceipt ? h('button', { type: 'button', class: 'text-action', 'aria-label': 'Receipt for ' + expense.category + ', ' + rm(expense.amount), onclick: () => viewReceipt(expense.id) }, icon('receipt', 16), 'Receipt') : null,
+      h('button', { type: 'button', class: 'text-action', 'aria-label': 'Edit ' + expense.category + ', ' + rm(expense.amount), onclick: () => openEditForm(expense.id) }, icon('edit', 16), 'Edit'),
+      h('span', { class: 'grow' }), del);
   }
 
-  if (open) {
-    item.append(h('div', { class: 'row-actions' },
-      expense.hasReceipt ? h('button', { type: 'button', class: 'btn btn-secondary btn-small', onclick: () => viewReceipt(expense.id) }, icon('receipt', 18), 'Receipt') : null,
-      expense.status ? null : h('button', { type: 'button', class: 'btn btn-secondary btn-small', onclick: () => openEditForm(expense.id) }, icon('edit', 18), 'Edit'),
-      expense.status === 'saving' ? null : h('button', {
-        type: 'button', class: 'btn btn-secondary btn-small is-danger',
-        onclick: () => deleteWithUndo([expense.id], expense.category + ' ' + rm(expense.amount) + ' deleted'),
-      }, icon('trash', 18), 'Delete')));
-  }
-  return item;
+  return h('li', { class: status === 'failed' ? 'is-failed' : null },
+    h('div', { class: 'row' },
+      categoryTile(expense.category),
+      h('div', { class: 'row-main' },
+        h('span', { class: 'row-title' }, expense.category),
+        expense.note ? h('span', { class: 'row-note' }, expense.note) : null,
+        status === 'failed' && expense.error ? h('span', { class: 'row-note', style: 'color:#b42318' }, expense.error) : null,
+        state.recentlyEdited.has(expense.id) ? h('span', { class: 'tag' }, icon('edit', 13, 2.4), 'Edited just now') : null),
+      h('span', { class: 'row-amount' }, rm(expense.amount))),
+    foot);
 }
 
 /** One entry in edit mode: a checkbox you tap to choose it. */
 function historySelectRow(expense) {
   const on = state.selected.has(expense.id);
   const unsaved = Boolean(expense.status);
-  return h('li', null, h('button', {
+  return h('li', { class: on ? 'is-selected' : null }, h('button', {
     type: 'button', class: 'row row-button', role: 'checkbox', 'aria-checked': String(on), disabled: unsaved,
     'data-key': 'pick-' + expense.id,
     onclick: () => { if (on) state.selected.delete(expense.id); else state.selected.add(expense.id); keepFocus('pick-' + expense.id); renderHistory(); },
   },
-  h('span', { class: 'check' + (on ? ' is-on' : ''), style: 'margin-top:8px' }, on ? icon('check', 18, 3) : null),
+  h('span', { class: 'check' + (on ? ' is-on' : ''), style: 'margin-top:7px' }, on ? icon('check', 16, 3) : null),
   categoryTile(expense.category),
   h('span', { class: 'row-main' },
-    h('span', { class: 'row-title', style: 'display:block' }, expense.category),
-    h('span', { class: 'row-note', style: 'display:block' }, expense.note || (unsaved ? 'Not saved yet' : ''))),
+    h('span', { class: 'row-title' }, expense.category),
+    h('span', { class: 'row-note' }, expense.note || (unsaved ? 'Not saved yet' : ''))),
   h('span', { class: 'row-amount' }, rm(expense.amount))));
 }
 
@@ -1756,7 +1940,6 @@ function startSelecting() {
   hideToast();
   state.selecting = true;
   state.selected.clear();
-  state.expandedId = null;
   updateNav();
   renderHistory();
 }
@@ -1785,7 +1968,7 @@ function updateSelectBar() {
   const button = $('delete-selected');
   const n = state.selected.size;
   button.disabled = n === 0;
-  setChildren(button, n ? icon('trash', 20, 2.2) : '', n ? 'Delete ' + plural(n, 'Entry', 'Entries') : 'Select Entries First');
+  setChildren(button, n ? icon('trash', 18, 2.2) : null, n ? 'Delete ' + plural(n, 'Entry', 'Entries') : 'Select Entries First');
 }
 
 /** Asks before deleting the chosen entries, listing them. */
@@ -1846,26 +2029,26 @@ async function handlePhotoChosen() {
   }
 }
 
-/** Remove Photo: in Add, forget it; in Edit, mark it to be removed on save. */
+/** Remove: in Add, forget the photo; in Edit, mark it to be removed on save. */
 function removeFormPhoto() {
   if (state.form.mode === 'edit') state.form.photo = state.form.original.hasReceipt ? { state: 'remove' } : { state: 'keep' };
   else state.form.photo = null;
   showPhoto(null);
+  $('photo-add').focus();
 }
 
 /**
- * Shows the photo area: src = an image to show, '' = a placeholder while
- * loading, null = no photo. Buttons change to match (Add / Replace + Remove).
+ * Shows the photo row: src = an image to show, '' = a placeholder while
+ * loading, null = no photo (then the row is "Add Receipt Photo").
  */
 function showPhoto(src) {
-  const thumb = $('photo-thumb');
   const has = src !== null;
-  thumb.hidden = !has;
+  $('photo-add').hidden = has;
+  $('photo-has').hidden = !has;
+  const thumb = $('photo-thumb');
   if (src) thumb.src = src;
   else thumb.removeAttribute('src');
-  $('photo-add').hidden = has;
   $('photo-replace').hidden = !has || state.form.mode !== 'edit';
-  $('photo-remove').hidden = !has;
 }
 
 /**
@@ -1937,13 +2120,13 @@ async function viewReceipt(id) {
   const status = h('p', { class: 'caption', role: 'status' }, 'Loading receipt…');
   const wrap = h('div', { class: 'viewer-image-wrap' }, status);
   viewer.dataset.id = id;
-  setChildren(viewer, 
+  setChildren(viewer,
     h('h2', { class: 'visually-hidden', id: 'viewer-title' }, 'Receipt'),
     wrap,
     h('div', null,
       h('p', { class: 'viewer-title' }, expense.category + ', ' + rm(expense.amount)),
       h('p', { class: 'caption' }, formatDay(expense.date, true))),
-    h('button', { type: 'button', class: 'btn btn-secondary btn-block', style: 'background:#fff;color:#0b0d12', onclick: () => viewer.close() }, 'Close'));
+    h('button', { type: 'button', class: 'btn btn-block', onclick: () => viewer.close() }, icon('close', 18, 2.4), 'Close'));
   viewer.showModal();
   try {
     const src = await getReceiptSrc(id);
@@ -1956,28 +2139,86 @@ async function viewReceipt(id) {
 }
 
 // ===========================================================================
-// 13. Settings and Delete my data
+// 13. Settings, your name, Delete my data
 // ===========================================================================
 
-/** Draws Settings: who is signed in, then Sign Out, Statement, Privacy, Delete. */
-function renderSettings() {
-  const user = state.user || {};
-  const name = user.name || user.email || '';
-  setChildren($('screen-settings'), 
-    h('div', { class: 'screen-head' }, h('h1', { class: 'title', id: 'settings-title' }, 'Settings')),
-    h('div', { class: 'card glass' }, h('div', { class: 'panel profile' },
-      h('span', { class: 'avatar', 'aria-hidden': 'true' }, (name[0] || '?').toUpperCase()),
-      h('div', { style: 'min-width:0' }, h('p', { class: 'name' }, user.name || 'Signed in'), h('p', { class: 'email' }, user.email)))),
-    h('div', { class: 'card glass' }, h('div', { class: 'panel' },
-      h('button', { type: 'button', class: 'settings-row', onclick: signOut }, icon('signOut', 22), h('span', { class: 'grow' }, 'Sign Out')),
-      h('button', { type: 'button', class: 'settings-row', onclick: () => openStatementSheet(currentMonth()) }, icon('download', 22), h('span', { class: 'grow' }, 'Download Statement'), icon('next', 18)),
-      h('a', { class: 'settings-row', href: 'privacy.html' }, icon('shield', 22), h('span', { class: 'grow' }, 'Privacy Policy'), icon('next', 18)))),
-    h('div', { class: 'card glass' }, h('div', { class: 'panel' },
-      h('button', { type: 'button', class: 'settings-row is-danger', onclick: openDeleteDataSheet }, icon('trash', 22), h('span', { class: 'grow' }, 'Delete My Data')))));
+/** The name shown in Settings and on statements: the one chosen, else Google's. */
+function displayName() {
+  if (!state.user) return '';
+  if (state.demo) return 'Demo User';
+  try {
+    const chosen = localStorage.getItem(NAME_PREFIX + state.user.email);
+    if (chosen) return chosen;
+  } catch (err) { /* ignore */ }
+  return state.user.name || '';
 }
 
 /**
- * "Delete everything?" — says exactly how much will go, and only allows the
+ * Draws Settings: the account card (name, email, Edit, Sign Out), then
+ * Download Statement and Privacy Policy, then Delete My Data. In the demo,
+ * the account card offers Sign In and Exit Demo, and Delete My Data is
+ * hidden because nothing is stored.
+ */
+function renderSettings() {
+  const user = state.user || {};
+  const name = displayName();
+  const account = state.demo
+    ? h('div', { class: 'card glass account' },
+      h('div', { class: 'profile' },
+        h('span', { class: 'avatar is-demo', 'aria-hidden': 'true' }, 'D'),
+        h('div', { style: 'flex:1;min-width:0' }, h('p', { class: 'name' }, 'Demo User'), h('p', { class: 'email' }, 'Not signed in'))),
+      h('button', { type: 'button', class: 'btn btn-primary btn-block', onclick: () => exitDemo('') }, 'Sign In with Google'),
+      h('button', { type: 'button', class: 'btn btn-secondary btn-block', onclick: () => exitDemo() }, 'Exit Demo'))
+    : h('div', { class: 'card glass account' },
+      h('div', { class: 'profile' },
+        h('span', { class: 'avatar', 'aria-hidden': 'true' }, ((name || user.email || '?')[0]).toUpperCase()),
+        h('div', { style: 'flex:1;min-width:0' }, h('p', { class: 'name' }, name || 'Add Your Name'), h('p', { class: 'email' }, user.email)),
+        h('button', { type: 'button', class: 'link-button', 'aria-label': 'Edit your name', onclick: openNameSheet }, 'Edit')),
+      h('button', { type: 'button', class: 'btn btn-secondary btn-block', onclick: signOut }, icon('signOut', 18, 2.2), 'Sign Out'));
+
+  setChildren($('screen-settings'),
+    h('div', { class: 'screen-head' }, h('h1', { class: 'title', id: 'settings-title' }, 'Settings')),
+    demoBanner(),
+    account,
+    h('div', { class: 'card glass' }, h('div', { class: 'panel' },
+      h('button', { type: 'button', class: 'settings-row', onclick: () => openStatementSheet(currentMonth()) }, icon('download', 18, 2.2), h('span', { class: 'grow' }, 'Download Statement'), icon('next', 16)),
+      h('a', { class: 'settings-row', href: 'privacy.html' }, icon('shield', 18), h('span', { class: 'grow' }, 'Privacy Policy'), icon('next', 16)))),
+    state.demo ? null : h('button', { type: 'button', class: 'danger-row', onclick: openDeleteDataSheet },
+      icon('trash', 18, 2.2), h('span', { class: 'grow' }, 'Delete My Data'), icon('next', 16)));
+}
+
+/**
+ * "Your Name in Sen Tracker": the name shown in Settings and on statements.
+ * It's kept on this device; the Google account name doesn't change.
+ * Saving it empty goes back to the Google name.
+ */
+function openNameSheet() {
+  const input = h('input', { id: 'name-input', class: 'text-input', type: 'text', maxlength: '60', autocomplete: 'name', value: displayName(), 'aria-describedby': 'name-help' });
+  const save = () => {
+    const value = input.value.trim();
+    try {
+      if (value && value !== state.user.name) localStorage.setItem(NAME_PREFIX + state.user.email, value);
+      else localStorage.removeItem(NAME_PREFIX + state.user.email);
+    } catch (err) { /* storage blocked: nothing to save */ }
+    closeSheet();
+    renderSettings();
+    showToast('Name saved');
+  };
+  input.addEventListener('keydown', (event) => { if (event.key === 'Enter') save(); });
+  fillSheet(
+    h('h2', { class: 'sheet-title', id: 'sheet-title' }, 'Your Name', h('span', { class: 'sub' }, 'in Sen Tracker')),
+    h('div', null, h('label', { class: 'field-label', for: 'name-input' }, 'Name'), input,
+      h('p', { class: 'input-help', id: 'name-help' }, "Shown in Settings and on your statements. Your Google account name doesn't change.")),
+    h('div', { class: 'sheet-actions' },
+      h('button', { type: 'button', class: 'btn btn-primary btn-block', onclick: save }, 'Save Name'),
+      h('button', { type: 'button', class: 'btn btn-secondary btn-block', onclick: closeSheet }, 'Cancel')));
+  openSheet();
+  input.focus();
+  input.select();
+}
+
+/**
+ * "Delete Everything?" — says exactly how much will go, and only allows the
  * red button once DELETE is typed (it shows "Ready" when it is).
  */
 function openDeleteDataSheet() {
@@ -2020,7 +2261,7 @@ function openDeleteDataSheet() {
     h('div', null, h('label', { class: 'field-label', for: 'delete-confirm-input' }, 'Type DELETE to Confirm', ready), input),
     error,
     h('div', { class: 'sheet-actions' }, button,
-      h('button', { type: 'button', class: 'btn btn-secondary btn-block', onclick: closeSheet }, 'Keep My Data')));
+      h('button', { type: 'button', class: 'btn btn-primary btn-block', onclick: closeSheet }, 'Keep My Data')));
   openSheet();
   input.focus();
 }
@@ -2030,9 +2271,9 @@ function openDeleteDataSheet() {
 // ===========================================================================
 
 /**
- * "Download statement" for a month. Shows the month (tap to change), how many
- * entries it has, and what the PDF contains. With no entries, the button is
- * dashed and says why: "Nothing to Download".
+ * "Download Statement" for a month. Shows the month (tap to change), how
+ * many entries it has, and what the PDF contains. With no entries, the
+ * button is dashed and says why: "Nothing to Download".
  */
 function openStatementSheet(month) {
   SenStatement.load().catch(() => { /* tried again on Download */ });
@@ -2045,34 +2286,39 @@ function openStatementSheet(month) {
       h('button', {
         type: 'button', class: 'details-row', 'aria-label': 'Month: ' + formatMonth(month) + '. Change month',
         onclick: () => openPeriodSheet({ types: ['month'], value: { type: 'month', value: month }, onChoose: (p) => openStatementSheet(p.value) }),
-      }, h('span', { class: 'grow', style: 'font-weight:500;color:#4b505b' }, 'Month'), formatMonth(month), icon('next', 18)),
-      h('div', { class: 'details-row', style: 'font-weight:500' }, h('span', { class: 'grow', style: 'color:#4b505b' }, 'Entries'), h('span', { style: 'font-weight:600' }, String(entries.length)))),
-    entries.length ? h('div', { class: 'panel', style: 'display:flex;gap:14px;padding:16px;align-items:flex-start' },
-      h('span', { class: 'tile', style: '--tile:#eef0f3;--cat:#0b0d12' }, icon('file', 22)),
-      h('div', null, h('p', { style: 'font-weight:600' }, 'PDF Document'),
+      }, h('span', { class: 'grow', style: 'color:#4b505b' }, 'Month'), h('strong', null, formatMonth(month)), icon('next', 16)),
+      h('div', { class: 'details-row' }, h('span', { class: 'grow', style: 'color:#4b505b' }, 'Entries'), h('strong', null, String(entries.length)))),
+    entries.length ? h('div', { class: 'panel', style: 'display:flex;gap:12px;padding:14px;align-items:flex-start' },
+      h('span', { class: 'pdf-tile', 'aria-hidden': 'true' }, 'PDF'),
+      h('div', null, h('p', { style: 'font-weight:600;font-size:15px' }, 'PDF Document'),
         h('p', { class: 'caption' }, 'Easy to print or share. Receipt photos are not included.' + (unsaved ? ' Entries not saved yet are left out.' : ''))))
       : h('div', { class: 'banner banner-warning', role: 'status' }, icon('info', 20),
         h('span', { class: 'banner-text' }, 'No entries in ' + formatMonthShort(month) + '. Pick another month.')),
     entries.length
-      ? h('button', { type: 'button', class: 'btn btn-primary btn-block', onclick: () => downloadStatement(month, entries) }, icon('download', 20, 2.4), 'Download ' + monthName)
+      ? h('button', { type: 'button', class: 'btn btn-primary btn-block', onclick: () => downloadStatement(month, entries) }, icon('download', 18, 2.4), 'Download ' + monthName)
       : h('button', { type: 'button', class: 'btn btn-block', disabled: true }, 'Nothing to Download'));
   openSheet();
 }
 
 /**
  * Makes the PDF (statement.js does the drawing), saves it to the phone, and
- * shows "Statement ready" with Open and, where the phone supports it, Share.
+ * shows "Statement Ready" with Open and, where the phone supports it, Share.
+ * Entries go in date order, oldest first, so it reads like a diary of the
+ * month; last month's entries are passed for the "vs" comparisons.
  */
 async function downloadStatement(month, entries) {
   let pdf;
   try {
     // Fonts and logo load once (they're stored by the service worker after).
     const resources = await SenStatement.load();
+    const oldestFirst = (a, b) => (a.date !== b.date ? (a.date < b.date ? -1 : 1) : (a.time || '') < (b.time || '') ? -1 : 1);
     pdf = SenStatement.build({
       month,
       monthLabel: formatMonth(month),
-      email: state.user.email,
-      entries, // already newest first, like History
+      name: displayName(),
+      email: state.demo ? 'Demo mode (sample data)' : state.user.email,
+      entries: entries.slice().sort(oldestFirst),
+      previousEntries: savedExpenses().filter((e) => e.date.startsWith(addMonths(month, -1) + '-')),
       generatedAt: new Date(),
     }, resources);
   } catch (err) {
@@ -2090,16 +2336,16 @@ async function downloadStatement(month, entries) {
   const canShare = navigator.canShare && navigator.canShare({ files: [file] });
   fillSheet(
     sheetHead('Statement', 'Ready.'),
-    h('div', { class: 'panel', style: 'display:flex;gap:14px;padding:16px;align-items:center' },
-      h('span', { class: 'tile', style: '--tile:#eef0f3;--cat:#0b0d12' }, icon('file', 22)),
+    h('div', { class: 'panel', style: 'display:flex;gap:12px;padding:14px;align-items:center' },
+      h('span', { class: 'pdf-tile', 'aria-hidden': 'true' }, 'PDF'),
       h('div', { style: 'min-width:0' }, h('p', { style: 'font-weight:600;overflow-wrap:anywhere' }, pdf.fileName),
         h('p', { class: 'caption' }, plural(pdf.pages, 'page', 'pages') + ' · saved to your downloads'))),
-    h('div', { class: 'sheet-actions' + (canShare ? ' side-by-side' : '') },
-      h('a', { class: 'btn btn-primary', href: url, target: '_blank', rel: 'noopener' }, icon('file', 20, 2.2), 'Open'),
+    h('div', { class: 'sheet-actions' },
+      h('a', { class: 'btn btn-primary btn-block', href: url, target: '_blank', rel: 'noopener' }, icon('file', 18, 2.2), 'Open'),
       canShare ? h('button', {
-        type: 'button', class: 'btn btn-secondary',
+        type: 'button', class: 'btn btn-secondary btn-block',
         onclick: () => navigator.share({ files: [file], title: pdf.fileName }).catch(() => { /* cancelled */ }),
-      }, icon('share', 20, 2.2), 'Share') : null));
+      }, icon('share', 18, 2.2), 'Share') : null));
 }
 
 // ===========================================================================
@@ -2118,11 +2364,11 @@ function showToast(message, options = {}) {
   state.toast = { onClose: options.onClose };
   toast.classList.toggle('is-error', Boolean(options.isError));
   toast.setAttribute('role', options.isError ? 'alert' : 'status');
-  setChildren(toast, 
-    h('span', { class: 'toast-icon' }, icon(options.isError ? 'alert' : 'check', 22, 2.6)),
+  setChildren(toast,
+    h('span', { class: 'toast-icon' }, icon(options.isError ? 'alert' : 'check', 20, 2.6)),
     h('span', { class: 'toast-text' }, message),
-    options.undo ? h('button', { type: 'button', class: 'toast-button', onclick: options.undo }, icon('undo', 18, 2.2), 'Undo') : null,
-    h('button', { type: 'button', class: 'toast-close', 'aria-label': 'Close message', onclick: hideToast }, icon('close', 20, 2.4)));
+    options.undo ? h('button', { type: 'button', class: 'toast-button', onclick: options.undo }, icon('undo', 16, 2.2), 'Undo') : null,
+    h('button', { type: 'button', class: 'toast-close', 'aria-label': 'Close message', onclick: hideToast }, icon('close', 18, 2.4)));
   toast.hidden = false;
 }
 
@@ -2138,7 +2384,7 @@ function hideToast() {
 function sheetHead(line1, line2) {
   return h('div', { class: 'sheet-head' },
     h('h2', { class: 'sheet-title', id: 'sheet-title' }, line1, h('span', { class: 'sub' }, line2)),
-    h('button', { type: 'button', class: 'btn btn-secondary btn-icon', 'aria-label': 'Close', onclick: closeSheet }, icon('close', 20, 2.4)));
+    h('button', { type: 'button', class: 'btn btn-secondary btn-icon', 'aria-label': 'Close', onclick: closeSheet }, icon('close', 18, 2.4)));
 }
 
 /** Replaces the pop-up's content (one <dialog> is reused for every pop-up). */
