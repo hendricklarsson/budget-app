@@ -39,8 +39,10 @@ const SHEET_NAME = 'Expenses';
 const FOLDER_NAME = 'Sen Tracker Receipts';
 
 // Column order in the sheet. Change it here and nowhere else.
+// 'time' (hh:mm, optional) was added later, at the end, so older sheets
+// keep working: ensureHeaders_() adds its header the first time it's needed.
 const HEADERS = ['id', 'email', 'date', 'amount', 'category', 'note',
-                 'receiptFileId', 'createdAt', 'deleted'];
+                 'receiptFileId', 'createdAt', 'deleted', 'time'];
 
 // COL.amount === 3, etc., so code reads row[COL.amount] instead of row[3].
 const COL = {};
@@ -48,7 +50,7 @@ HEADERS.forEach(function (name, index) { COL[name] = index; });
 
 // Number formats per column: '@' means plain text, so Sheets never turns
 // "2026-11-21" into a date or "007" into 7.
-const COLUMN_FORMATS = ['@', '@', '@', '0.00', '@', '@', '@', '@', 'General'];
+const COLUMN_FORMATS = ['@', '@', '@', '0.00', '@', '@', '@', '@', 'General', '@'];
 
 const CATEGORIES = ['Food', 'Transport', 'Bills', 'Shopping', 'Health',
                     'Entertainment', 'Other'];
@@ -322,6 +324,7 @@ function listExpenses_(email) {
     .map(rowToExpense_);
   expenses.sort(function (a, b) {
     if (a.date !== b.date) return a.date < b.date ? 1 : -1;
+    if (a.time !== b.time) return a.time < b.time ? 1 : -1;
     return a.createdAt < b.createdAt ? 1 : -1;
   });
   return { expenses: expenses };
@@ -406,6 +409,7 @@ function writeExpenseRow_(sheet, expense, email, receiptFileId) {
   row[COL.receiptFileId] = receiptFileId;
   row[COL.createdAt] = new Date().toISOString();
   row[COL.deleted] = false;
+  row[COL.time] = expense.time;
 
   const range = sheet.getRange(sheet.getLastRow() + 1, 1, 1, HEADERS.length);
   range.setNumberFormats([COLUMN_FORMATS]); // set text format BEFORE writing
@@ -446,6 +450,7 @@ function updateExpense_(input, email) {
         const row = rows[i].slice();          // keep id, email, createdAt as they are
         oldFileId = String(row[COL.receiptFileId] || '');
         row[COL.date] = expense.date;
+        row[COL.time] = expense.time;
         row[COL.amount] = expense.amount;
         row[COL.category] = expense.category;
         row[COL.note] = safeText_(expense.note);
@@ -708,7 +713,13 @@ function validateExpense_(input) {
     throw new ApiError('BAD_REQUEST', 'Note must be ' + MAX_NOTE_LENGTH + ' characters or fewer.');
   }
 
-  return { id: id, amount: amount, category: input.category, date: input.date, note: note };
+  // Time of day is optional ('' for older entries): 24-hour "hh:mm".
+  const time = input.time == null ? '' : input.time;
+  if (time !== '' && (typeof time !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time))) {
+    throw new ApiError('BAD_REQUEST', 'Time must be in the form hh:mm.');
+  }
+
+  return { id: id, amount: amount, category: input.category, date: input.date, time: time, note: note };
 }
 
 /** Ids are made by the app (a UUID). Allow only letters, digits, - and _. */
@@ -776,7 +787,18 @@ function getSheet_() {
   if (!id) throw new ApiError('SERVER', 'Server not set up: run setup() in the Apps Script editor.');
   const sheet = SpreadsheetApp.openById(id).getSheetByName(SHEET_NAME);
   if (!sheet) throw new ApiError('SERVER', 'The "' + SHEET_NAME + '" tab is missing: run setup() again.');
+  ensureHeaders_(sheet);
   return sheet;
+}
+
+/**
+ * Adds headers for columns added after setup() first ran (like "time"), so
+ * an older sheet doesn't need setup() again. Cheap: it only reads the
+ * number of the last used column.
+ */
+function ensureHeaders_(sheet) {
+  if (sheet.getLastColumn() >= HEADERS.length) return;
+  sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]).setFontWeight('bold');
 }
 
 /** Opens the private receipts folder using the ID saved by setup(). */
@@ -811,12 +833,22 @@ function rowToExpense_(row) {
   return {
     id: String(row[COL.id]),
     date: toDateText_(row[COL.date]),
+    time: toTimeText_(row[COL.time]),
     amount: Number(row[COL.amount]),
     category: String(row[COL.category]),
     note: String(row[COL.note] || ''),
     hasReceipt: Boolean(row[COL.receiptFileId]),
     createdAt: row[COL.createdAt] instanceof Date ? row[COL.createdAt].toISOString() : String(row[COL.createdAt]),
   };
+}
+
+/**
+ * Times are stored as text ("09:41"); if Sheets turned one into a time value,
+ * turn it back. Empty for entries saved before times were recorded.
+ */
+function toTimeText_(value) {
+  if (value instanceof Date) return Utilities.formatDate(value, Session.getScriptTimeZone(), 'HH:mm');
+  return value ? String(value) : '';
 }
 
 /**
