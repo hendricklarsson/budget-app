@@ -974,7 +974,7 @@ function renderOverview() {
   if (!all.length) {
     setChildren(screen, head, offlineBanner(),
       h('div', { class: 'empty' },
-        h('h2', { class: 'title' }, 'Your overview', h('span', { class: 'sub' }, 'starts here.')),
+        h('h2', { class: 'title' }, 'Your Overview', h('span', { class: 'sub' }, 'Starts Here.')),
         h('p', { class: 'caption' }, 'Add your first expense to see charts.'),
         h('button', { type: 'button', class: 'btn btn-primary btn-medium', onclick: openAddForm },
           icon('plus', 20, 2.4), 'Add Expense')));
@@ -989,7 +989,7 @@ function renderOverview() {
     setChildren(screen, head, offlineBanner(),
       h('div', { class: 'empty' },
         h('div', { class: 'empty-icon glass' }, icon('calendar', 40, 1.8)),
-        h('h2', { class: 'title' }, 'No spending', h('span', { class: 'sub' }, words)),
+        h('h2', { class: 'title' }, 'No Spending', h('span', { class: 'sub' }, words)),
         periodHasToday(period) ? null : h('button', {
           type: 'button', class: 'btn btn-secondary btn-medium',
           onclick: () => setOverviewPeriod(current),
@@ -1040,14 +1040,16 @@ function overviewHero(entries) {
 
   // The total, with averages and the Add Expense button.
   const label = period.type === 'day' ? 'Spent on ' + formatDay(period.value) :
-    period.type === 'year' ? 'Spent in ' + period.value : 'Spent this month';
+    period.type === 'year' ? 'Spent in ' + period.value : 'Spent This Month';
   const stats = [];
+  // Averages count only days (or months) that have spending, so one RM 52
+  // entry shows RM 52.00, not RM 52 spread over every day of the month.
   if (period.type === 'month') {
-    const days = periodHasToday(period) ? parseDate(today()).getDate() : daysInMonth(period.value);
-    stats.push(['Daily average', rm(total / days)]);
+    const days = new Set(entries.map((e) => e.date)).size;
+    stats.push(['Daily Average', rm(total / days)]);
   } else if (period.type === 'year') {
-    const months = period.value === today().slice(0, 4) ? new Date().getMonth() + 1 : 12;
-    stats.push(['Monthly average', rm(total / months)]);
+    const months = new Set(entries.map((e) => e.date.slice(0, 7))).size;
+    stats.push(['Monthly Average', rm(total / months)]);
   } else {
     stats.push(['Largest', rm(Math.max(...entries.map((e) => e.amount)))]);
   }
@@ -1072,7 +1074,7 @@ function overviewHero(entries) {
     const days = Object.keys(byDay);
     if (days.length > 1) {
       const biggest = days.reduce((a, b) => (byDay[b] > byDay[a] ? b : a));
-      stack.append(h('div', { class: 'biggest glass' }, 'Biggest day',
+      stack.append(h('div', { class: 'biggest glass' }, 'Biggest Day',
         h('strong', null, formatDay(biggest) + ', ' + rm(byDay[biggest]))));
     }
   }
@@ -1130,7 +1132,7 @@ function overviewWeek() {
     : first.getDate() + ' ' + MONTHS[first.getMonth()].slice(0, 3) + ' to ' + last.getDate() + ' ' + MONTHS[last.getMonth()].slice(0, 3);
 
   return h('section', { class: 'week glass', 'aria-labelledby': 'week-title' },
-    h('div', { class: 'week-head' }, h('h2', { class: 'section-title', id: 'week-title' }, 'This week'), h('span', { class: 'caption' }, range)),
+    h('div', { class: 'week-head' }, h('h2', { class: 'section-title', id: 'week-title' }, 'This Week'), h('span', { class: 'caption' }, range)),
     h('div', { class: 'week-days' }, buttons),
     h('div', { class: 'week-foot', 'aria-live': 'polite' },
       h('span', null, formatDayLong(chosen)), h('span', { class: 'amount' }, rm(byDay[chosen] || 0))));
@@ -1156,7 +1158,7 @@ function overviewCategories(entries) {
   const rest = rows.slice(3);
 
   return h('section', { 'aria-labelledby': 'cat-title' },
-    h('h2', { class: 'block-title', id: 'cat-title' }, 'Where it went', h('span', { class: 'sub' }, 'by category')),
+    h('h2', { class: 'block-title', id: 'cat-title' }, 'Where It Went', h('span', { class: 'sub' }, 'By Category')),
     h('div', { class: 'tiles' }, tiles),
     rest.length ? h('div', { class: 'card glass' }, h('div', { class: 'panel' },
       rest.map((row) => h('div', { class: 'cat-row', 'data-cat': row.name },
@@ -1277,7 +1279,7 @@ function renderPeriodSheet(picker) {
     }, type[0].toUpperCase() + type.slice(1)))) : null;
 
   fillSheet(
-    sheetHead('Choose', 'period'),
+    sheetHead('Choose', 'Period'),
     tabs, ...body,
     h('button', {
       type: 'button', class: 'btn btn-primary btn-block',
@@ -1560,9 +1562,9 @@ function cancelEdit() {
   const changes = editChanges();
   if (!changes.length) return leaveEdit();
   fillSheet(
-    h('h2', { class: 'sheet-title', id: 'sheet-title' }, 'Discard', h('span', { class: 'sub' }, 'changes?')),
+    h('h2', { class: 'sheet-title', id: 'sheet-title' }, 'Discard', h('span', { class: 'sub' }, 'Changes?')),
     h('div', { class: 'panel' }, changes.map(([field, before, now]) => h('div', null,
-      h('div', { class: 'kv' }, h('span', { class: 'k' }, field + ' before'), h('span', { class: 'v' }, before)),
+      h('div', { class: 'kv' }, h('span', { class: 'k' }, field + ' Before'), h('span', { class: 'v' }, before)),
       h('div', { class: 'kv' }, h('span', { class: 'k' }, 'Now'), h('span', { class: 'v' }, now))))),
     h('div', { class: 'sheet-actions' },
       h('button', { type: 'button', class: 'btn btn-primary btn-block', onclick: closeSheet }, 'Keep Editing'),
@@ -1657,8 +1659,8 @@ function renderHistory() {
       h('button', { type: 'button', class: 'btn btn-secondary btn-small', onclick: () => toggleSelectAll(entries, allChosen) },
         allChosen ? 'Select None' : 'Select All')),
     h('div', { class: 'screen-head' },
-      h('h1', { class: 'title', id: 'history-title', 'aria-live': 'polite' }, state.selected.size + ' selected',
-        h('span', { class: 'sub' }, 'Tap to choose'))));
+      h('h1', { class: 'title', id: 'history-title', 'aria-live': 'polite' }, state.selected.size + ' Selected',
+        h('span', { class: 'sub' }, 'Tap to Choose'))));
   } else {
     parts.push(h('div', { class: 'screen-head' },
       h('h1', { class: 'title', id: 'history-title' }, 'History',
@@ -1679,7 +1681,7 @@ function renderHistory() {
     const isNow = month === currentMonth();
     parts.push(h('div', { class: 'empty' },
       h('div', { class: 'empty-icon glass' }, icon('receipt', 40, 1.8)),
-      h('h2', { class: 'title' }, 'No entries', h('span', { class: 'sub' }, isNow ? 'yet this month.' : 'in ' + formatMonthShort(month) + '.')),
+      h('h2', { class: 'title' }, 'No Entries', h('span', { class: 'sub' }, isNow ? 'Yet This Month.' : 'in ' + formatMonthShort(month) + '.')),
       isNow ? h('button', { type: 'button', class: 'btn btn-primary btn-medium', onclick: openAddForm }, icon('plus', 20, 2.4), 'Add Expense')
         : h('button', { type: 'button', class: 'btn btn-secondary btn-medium', onclick: () => { state.historyMonth = currentMonth(); renderHistory(); } }, 'Go to This Month')));
   } else {
@@ -1792,7 +1794,7 @@ function confirmDeleteSelected() {
   if (!chosen.length) return;
   const n = chosen.length;
   fillSheet(
-    h('h2', { class: 'sheet-title', id: 'sheet-title' }, 'Delete', h('span', { class: 'sub' }, plural(n, 'entry', 'entries') + '?')),
+    h('h2', { class: 'sheet-title', id: 'sheet-title' }, 'Delete', h('span', { class: 'sub' }, plural(n, 'Entry', 'Entries') + '?')),
     h('div', { class: 'panel' },
       chosen.slice(0, 6).map((e) => h('div', { class: 'kv' },
         h('span', { class: 'k' }, e.category + ', ' + formatDay(e.date)), h('span', { class: 'v' }, rm(e.amount)))),
@@ -2013,9 +2015,9 @@ function openDeleteDataSheet() {
     }
   });
   fillSheet(
-    h('h2', { class: 'sheet-title', id: 'sheet-title' }, 'Delete', h('span', { class: 'sub' }, 'everything?')),
+    h('h2', { class: 'sheet-title', id: 'sheet-title' }, 'Delete', h('span', { class: 'sub' }, 'Everything?')),
     h('p', { class: 'sheet-message' }, plural(saved.length, 'entry', 'entries') + ' and ' + plural(photos, 'photo', 'photos') + ". You can't get them back."),
-    h('div', null, h('label', { class: 'field-label', for: 'delete-confirm-input' }, 'Type DELETE to confirm', ready), input),
+    h('div', null, h('label', { class: 'field-label', for: 'delete-confirm-input' }, 'Type DELETE to Confirm', ready), input),
     error,
     h('div', { class: 'sheet-actions' }, button,
       h('button', { type: 'button', class: 'btn btn-secondary btn-block', onclick: closeSheet }, 'Keep My Data')));
@@ -2033,11 +2035,12 @@ function openDeleteDataSheet() {
  * dashed and says why: "Nothing to Download".
  */
 function openStatementSheet(month) {
+  SenStatement.load().catch(() => { /* tried again on Download */ });
   const entries = savedExpenses().filter((e) => e.date.startsWith(month + '-'));
   const unsaved = state.expenses.some((e) => e.status && e.date.startsWith(month + '-'));
   const monthName = MONTHS[Number(month.slice(5)) - 1];
   fillSheet(
-    sheetHead('Download', 'statement'),
+    sheetHead('Download', 'Statement'),
     h('div', { class: 'panel' },
       h('button', {
         type: 'button', class: 'details-row', 'aria-label': 'Month: ' + formatMonth(month) + '. Change month',
@@ -2060,19 +2063,21 @@ function openStatementSheet(month) {
  * Makes the PDF (statement.js does the drawing), saves it to the phone, and
  * shows "Statement ready" with Open and, where the phone supports it, Share.
  */
-function downloadStatement(month, entries) {
+async function downloadStatement(month, entries) {
   let pdf;
   try {
+    // Fonts and logo load once (they're stored by the service worker after).
+    const resources = await SenStatement.load();
     pdf = SenStatement.build({
       month,
       monthLabel: formatMonth(month),
       email: state.user.email,
-      entries: entries.slice().sort((a, b) => (a.date === b.date ? (a.createdAt < b.createdAt ? -1 : 1) : a.date < b.date ? -1 : 1)),
+      entries, // already newest first, like History
       generatedAt: new Date(),
-    });
+    }, resources);
   } catch (err) {
     console.error(err);
-    showToast("Couldn't make the statement. Please try again.", { isError: true });
+    showToast("Couldn't make the statement. Check your connection and try again.", { isError: true });
     return;
   }
   const file = new File([pdf.bytes], pdf.fileName, { type: 'application/pdf' });
@@ -2084,7 +2089,7 @@ function downloadStatement(month, entries) {
 
   const canShare = navigator.canShare && navigator.canShare({ files: [file] });
   fillSheet(
-    sheetHead('Statement', 'ready.'),
+    sheetHead('Statement', 'Ready.'),
     h('div', { class: 'panel', style: 'display:flex;gap:14px;padding:16px;align-items:center' },
       h('span', { class: 'tile', style: '--tile:#eef0f3;--cat:#0b0d12' }, icon('file', 22)),
       h('div', { style: 'min-width:0' }, h('p', { style: 'font-weight:600;overflow-wrap:anywhere' }, pdf.fileName),
