@@ -1,98 +1,252 @@
 // statement.js — makes the monthly PDF statement, with no library.
 //
-// A PDF is a text-like file made of numbered "objects" (pages, fonts, drawing
+// A PDF is a file made of numbered "objects" (pages, fonts, images, drawing
 // instructions) plus a table saying where each object starts. This file
 // writes one by hand:
 //
-//   1. LAYOUT: decide what goes where on each A4 page (in points; 72 = 1 inch).
-//   2. DRAWING: each page gets a list of drawing instructions ("content stream").
-//   3. TAGS: so screen readers can read it in order, every piece of text is
+//   1. FONTS: reads the Geist font files (TrueType) and embeds only the
+//      letters the statement uses, so the PDF looks like the app and stays small.
+//   2. LAYOUT: decides what goes where on each A4 page (in points; 72 = 1 inch).
+//   3. DRAWING: each page gets a list of drawing instructions ("content stream").
+//   4. TAGS: so screen readers can read it in order, every piece of text is
 //      marked as part of a heading, paragraph or table cell ("tagged PDF").
-//      Lines, boxes and the page footer are marked as decoration ("Artifact").
-//   4. FILE: the objects are joined together with the byte positions table.
+//      Lines, boxes, dots, the logo and the page footer are "Artifact" (decoration).
+//   5. FILE: the objects are joined with the table of byte positions.
 //
-// It uses Helvetica, one of the 14 fonts every PDF reader has built in, so no
-// font file is needed. Helvetica only covers Western European letters: any
-// other character (Chinese, Tamil, emoji) is shown as "?".
-//
-// Used by app.js:  SenStatement.build({month, monthLabel, email, entries, generatedAt})
-//   → {bytes, pages, fileName}
+// Used by app.js:
+//   const resources = await SenStatement.load();     // fonts + logo, once
+//   SenStatement.build({month, monthLabel, email, entries, generatedAt}, resources)
+//     → {bytes, pages, fileName}
 
 'use strict';
 
 const SenStatement = (() => {
   const PAGE_W = 595.28;   // A4 width in points
   const PAGE_H = 841.89;   // A4 height in points
-  const LEFT = 48;
-  const RIGHT = PAGE_W - 48;
-  const BOTTOM_LIMIT = PAGE_H - 78; // content stops here; the footer goes below
+  const LEFT = 44;
+  const RIGHT = PAGE_W - 44;
+  const BOTTOM_LIMIT = PAGE_H - 84; // content stops here; the footer goes below
 
   const INK = [0.043, 0.051, 0.071];   // #0b0d12
   const MUTED = [0.337, 0.357, 0.4];   // #565b66
-  const RULE = [0.82, 0.83, 0.85];
-
+  const RULE = [0.86, 0.87, 0.89];
+  const CATEGORY_COLORS = {            // the app's category colours
+    Food: [0.851, 0.329, 0.118], Transport: [0.169, 0.541, 0.275], Bills: [0.384, 0.278, 0.847],
+    Shopping: [0.812, 0.216, 0.518], Health: [0.043, 0.525, 0.596], Entertainment: [0.612, 0.435, 0],
+    Other: [0.365, 0.392, 0.447],
+  };
   const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
                   'September', 'October', 'November', 'December'];
-  const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  const CATEGORIES = ['Food', 'Transport', 'Bills', 'Shopping', 'Health', 'Entertainment', 'Other'];
+  const CATEGORIES = Object.keys(CATEGORY_COLORS);
 
   // -------------------------------------------------------------------------
-  // Text: measuring and encoding
+  // 1. Fonts: reading a TrueType file
   // -------------------------------------------------------------------------
+  //
+  // A TrueType font is a set of tables, each with a 4-letter name:
+  //   cmap — which glyph (shape) number draws each character
+  //   hmtx — how wide each glyph is
+  //   glyf — the shapes themselves; loca — where each shape starts in glyf
+  //   head, hhea, maxp — sizes and counts
 
-  // Character widths (per 1000 units of font size) for codes 32–126, from
-  // Adobe's published font metrics. Needed to right-align amounts and to
-  // shorten long notes so they fit their column.
-  const WIDTHS = {
-    R: [278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,
-        278,278,584,584,584,556,1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,
-        611,722,667,944,667,667,611,278,278,278,469,556,333,556,556,500,556,556,278,556,556,222,222,500,222,833,
-        556,556,556,556,333,500,278,556,500,722,500,500,500,334,260,334,584],
-    B: [278,333,474,556,556,889,722,238,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,
-        333,333,584,584,584,611,975,722,722,722,722,667,611,778,722,278,556,722,611,833,722,778,667,778,722,667,
-        611,722,667,944,667,667,611,333,278,333,584,556,333,556,611,556,611,556,333,611,611,278,278,556,278,889,
-        611,611,611,611,389,556,333,611,556,778,556,556,500,389,280,389,584],
-  };
-
-  // Characters outside plain ASCII that Helvetica's "WinAnsi" encoding has,
-  // with their code. Latin-1 letters (é, ñ, ü...) share their Unicode number.
-  const WIN_ANSI = { '€': 0x80, '‚': 0x82, '„': 0x84, '…': 0x85, '‘': 0x91, '’': 0x92, '“': 0x93, '”': 0x94,
-                     '•': 0x95, '–': 0x96, '—': 0x97, '™': 0x99 };
-
-  /** Turns text into WinAnsi byte codes; anything Helvetica can't show becomes "?". */
-  function encode(text) {
-    const codes = [];
-    for (const ch of String(text)) {
-      const u = ch.codePointAt(0);
-      if (u >= 32 && u <= 126) codes.push(u);
-      else if (u >= 160 && u <= 255) codes.push(u);
-      else if (WIN_ANSI[ch]) codes.push(WIN_ANSI[ch]);
-      else if (u === 9 || u === 10 || u === 13) codes.push(32);
-      else codes.push(63); // "?"
+  /** Reads the parts of a TrueType font we need. bytes: Uint8Array. */
+  function readFont(bytes, name) {
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const tables = {};
+    for (let i = 0; i < dv.getUint16(4); i++) {
+      const at = 12 + i * 16;
+      const tagName = String.fromCharCode(bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]);
+      tables[tagName] = { offset: dv.getUint32(at + 8), length: dv.getUint32(at + 12) };
     }
-    return codes;
+    const head = tables.head.offset;
+    const hhea = tables.hhea.offset;
+    const numGlyphs = dv.getUint16(tables.maxp.offset + 4);
+    const numHMetrics = dv.getUint16(hhea + 34);
+    const os2 = tables['OS/2'] ? tables['OS/2'].offset : null;
+
+    const font = {
+      name, bytes, dv, tables, numGlyphs,
+      unitsPerEm: dv.getUint16(head + 18),
+      bbox: [dv.getInt16(head + 36), dv.getInt16(head + 38), dv.getInt16(head + 40), dv.getInt16(head + 42)],
+      ascent: dv.getInt16(hhea + 4),
+      descent: dv.getInt16(hhea + 6),
+      capHeight: os2 && dv.getUint16(os2) >= 2 ? dv.getInt16(os2 + 88) : dv.getInt16(hhea + 4),
+      advances: [],
+      glyphFor: new Map(),   // character code → glyph number
+      used: new Map(),       // glyph number → character, for this statement
+    };
+    for (let g = 0; g < numGlyphs; g++) {
+      font.advances.push(dv.getUint16(tables.hmtx.offset + Math.min(g, numHMetrics - 1) * 4));
+    }
+
+    // Where each glyph's shape starts and ends in the glyf table.
+    const longLoca = dv.getInt16(head + 50) === 1;
+    font.loca = [];
+    for (let g = 0; g <= numGlyphs; g++) {
+      font.loca.push(longLoca ? dv.getUint32(tables.loca.offset + g * 4) : dv.getUint16(tables.loca.offset + g * 2) * 2);
+    }
+
+    // The character map: prefer the full-Unicode table (format 12), else format 4.
+    const cmap = tables.cmap.offset;
+    let best = null;
+    for (let i = 0; i < dv.getUint16(cmap + 2); i++) {
+      const platform = dv.getUint16(cmap + 4 + i * 8);
+      const encoding = dv.getUint16(cmap + 6 + i * 8);
+      const sub = cmap + dv.getUint32(cmap + 8 + i * 8);
+      const format = dv.getUint16(sub);
+      if (platform === 3 && encoding === 10 && format === 12) best = { sub, format };
+      else if (platform === 3 && encoding === 1 && format === 4 && !best) best = { sub, format };
+    }
+    if (best.format === 12) {
+      const groups = dv.getUint32(best.sub + 12);
+      for (let i = 0; i < groups; i++) {
+        const at = best.sub + 16 + i * 12;
+        const start = dv.getUint32(at);
+        const end = dv.getUint32(at + 4);
+        const first = dv.getUint32(at + 8);
+        for (let c = start; c <= end && c <= 0x2ffff; c++) font.glyphFor.set(c, first + c - start);
+      }
+    } else {
+      const segX2 = dv.getUint16(best.sub + 6);
+      const ends = best.sub + 14;
+      const starts = ends + segX2 + 2;
+      const deltas = starts + segX2;
+      const ranges = deltas + segX2;
+      for (let i = 0; i < segX2 / 2; i++) {
+        const start = dv.getUint16(starts + i * 2);
+        const end = dv.getUint16(ends + i * 2);
+        const delta = dv.getInt16(deltas + i * 2);
+        const range = dv.getUint16(ranges + i * 2);
+        for (let c = start; c <= end && c !== 0xffff; c++) {
+          let g = range === 0 ? c + delta : dv.getUint16(ranges + i * 2 + range + (c - start) * 2);
+          if (range !== 0 && g !== 0) g += delta;
+          g &= 0xffff;
+          if (g) font.glyphFor.set(c, g);
+        }
+      }
+    }
+    font.question = font.glyphFor.get(63); // "?" for characters Geist doesn't have
+    return font;
   }
 
-  /** Width of text in points, for font 'R' (regular) or 'B' (bold). */
-  function width(text, font, size) {
-    let units = 0;
-    for (const code of encode(text)) {
-      units += code >= 32 && code <= 126 ? WIDTHS[font][code - 32] : code === 0x85 ? 1000 : 556;
+  /** The glyph numbers for a piece of text (unknown characters become "?"). */
+  function glyphs(font, textValue) {
+    const out = [];
+    for (const ch of String(textValue).replace(/[\t\r\n]/g, ' ')) {
+      const code = ch.codePointAt(0);
+      const g = font.glyphFor.get(code);
+      out.push(g ? { g, ch } : { g: font.question, ch: '?' });
     }
-    return (units * size) / 1000;
+    return out;
+  }
+
+  /** Width of text in points at a font size. */
+  function width(font, textValue, size) {
+    return glyphs(font, textValue).reduce((w, { g }) => w + font.advances[g], 0) * size / font.unitsPerEm;
   }
 
   /** Shortens text with "…" until it fits maxWidth. */
-  function fit(text, font, size, maxWidth) {
-    if (width(text, font, size) <= maxWidth) return text;
-    let s = String(text);
-    while (s.length && width(s + '…', font, size) > maxWidth) s = s.slice(0, -1);
+  function fit(font, textValue, size, maxWidth) {
+    if (width(font, textValue, size) <= maxWidth) return textValue;
+    let s = String(textValue);
+    while (s.length && width(font, s + '…', size) > maxWidth) s = s.slice(0, -1);
     return s.trimEnd() + '…';
   }
 
-  /** Text as a PDF hex string, e.g. "RM" → <524D>. Hex needs no escaping. */
-  function hex(text) {
-    return '<' + encode(text).map((c) => c.toString(16).padStart(2, '0')).join('').toUpperCase() + '>';
+  /**
+   * Makes a small copy of the font with only the glyphs this statement uses
+   * (the rest are left empty), so a 125 KB font adds only ~15 KB to the PDF.
+   * Glyph numbers stay the same, so text can refer to them directly.
+   */
+  function subsetFont(font) {
+    const { dv, bytes, tables } = font;
+    const keep = new Set([0, ...font.used.keys()]);
+    // Some glyphs (like "é") are built from others ("e" + accent): keep those too.
+    const queue = [...keep];
+    while (queue.length) {
+      const g = queue.pop();
+      const start = tables.glyf.offset + font.loca[g];
+      if (font.loca[g + 1] === font.loca[g] || dv.getInt16(start) >= 0) continue;
+      let at = start + 10;
+      for (;;) {
+        const flags = dv.getUint16(at);
+        const part = dv.getUint16(at + 2);
+        if (!keep.has(part)) { keep.add(part); queue.push(part); }
+        at += 4 + (flags & 1 ? 4 : 2) + (flags & 8 ? 2 : flags & 0x40 ? 4 : flags & 0x80 ? 8 : 0);
+        if (!(flags & 0x20)) break;
+      }
+    }
+
+    // New glyf and loca tables (long offsets).
+    const pieces = [];
+    const loca = new DataView(new ArrayBuffer((font.numGlyphs + 1) * 4));
+    let size = 0;
+    for (let g = 0; g < font.numGlyphs; g++) {
+      loca.setUint32(g * 4, size);
+      if (keep.has(g) && font.loca[g + 1] > font.loca[g]) {
+        const piece = bytes.subarray(tables.glyf.offset + font.loca[g], tables.glyf.offset + font.loca[g + 1]);
+        pieces.push(piece);
+        size += piece.length;
+        const padding = (4 - (piece.length % 4)) % 4;
+        if (padding) { pieces.push(new Uint8Array(padding)); size += padding; }
+      }
+    }
+    loca.setUint32(font.numGlyphs * 4, size);
+    const glyf = joinBytes(pieces);
+
+    // head: say loca uses long offsets, and clear the whole-file checksum.
+    const head = bytes.slice(tables.head.offset, tables.head.offset + tables.head.length);
+    new DataView(head.buffer).setInt16(50, 1);
+    new DataView(head.buffer).setUint32(8, 0);
+
+    const copy = (t) => (tables[t] ? bytes.slice(tables[t].offset, tables[t].offset + tables[t].length) : null);
+    const out = { 'cvt ': copy('cvt '), fpgm: copy('fpgm'), glyf, head, hhea: copy('hhea'), hmtx: copy('hmtx'),
+                  loca: new Uint8Array(loca.buffer), maxp: copy('maxp'), prep: copy('prep') };
+    const names = Object.keys(out).filter((t) => out[t]).sort();
+
+    // Write the font file: a header, a directory of tables, then the tables.
+    const headerSize = 12 + names.length * 16;
+    let offset = headerSize;
+    const directory = new DataView(new ArrayBuffer(headerSize));
+    directory.setUint32(0, 0x00010000);
+    directory.setUint16(4, names.length);
+    let power = 1;
+    while (power * 2 <= names.length) power *= 2;
+    directory.setUint16(6, power * 16);
+    directory.setUint16(8, Math.log2(power));
+    directory.setUint16(10, names.length * 16 - power * 16);
+    const body = [];
+    names.forEach((t, i) => {
+      const data = out[t];
+      const at = 12 + i * 16;
+      for (let k = 0; k < 4; k++) directory.setUint8(at + k, t.charCodeAt(k));
+      directory.setUint32(at + 4, checksum(data));
+      directory.setUint32(at + 8, offset);
+      directory.setUint32(at + 12, data.length);
+      const padded = new Uint8Array(Math.ceil(data.length / 4) * 4);
+      padded.set(data);
+      body.push(padded);
+      offset += padded.length;
+    });
+    return joinBytes([new Uint8Array(directory.buffer), ...body]);
+  }
+
+  /** TrueType table checksum: the sum of its 4-byte numbers. */
+  function checksum(data) {
+    const padded = new Uint8Array(Math.ceil(data.length / 4) * 4);
+    padded.set(data);
+    const dv = new DataView(padded.buffer);
+    let sum = 0;
+    for (let i = 0; i < padded.length; i += 4) sum = (sum + dv.getUint32(i)) >>> 0;
+    return sum;
+  }
+
+  /** Joins byte arrays into one. */
+  function joinBytes(parts) {
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let at = 0;
+    for (const p of parts) { out.set(p, at); at += p.length; }
+    return out;
   }
 
   // -------------------------------------------------------------------------
@@ -103,15 +257,12 @@ const SenStatement = (() => {
   const rm = (amount) => 'RM ' + number.format(amount);
   const sum = (entries) => entries.reduce((sen, e) => sen + Math.round(e.amount * 100), 0) / 100;
   const pad2 = (n) => String(n).padStart(2, '0');
-  function dayLabel(text) {
-    const [y, m, d] = text.split('-').map(Number);
-    return DAYS[new Date(y, m - 1, d).getDay()] + ', ' + d + ' ' + MONTHS[m - 1].slice(0, 3);
-  }
+  const shortDate = (textValue) => Number(textValue.slice(8)) + ' ' + MONTHS[Number(textValue.slice(5, 7)) - 1].slice(0, 3);
   const f = (n) => (Math.round(n * 100) / 100).toString(); // numbers in drawing instructions
   const color = (c) => c.map(f).join(' ');
 
   // -------------------------------------------------------------------------
-  // The document being built: pages, drawing instructions and tags
+  // 2–4. Layout, drawing and tags
   // -------------------------------------------------------------------------
 
   /**
@@ -124,30 +275,30 @@ const SenStatement = (() => {
     return el;
   }
 
-  function newDocument() {
-    const doc = { pages: [], root: tag('Document', null) };
-    addPage(doc);
-    return doc;
-  }
-
   /** Starts a new page. Each page numbers its marked pieces (MCIDs) from 0. */
   function addPage(doc) {
-    const page = { ops: [], mcids: [], y: 48 };
+    const page = { ops: [], mcids: [], y: 0 };
     doc.pages.push(page);
     doc.page = page;
     return page;
   }
 
   /**
-   * Draws text at (x, top) — top measured from the top of the page — and
-   * marks it as content of the tag `owner` (or as decoration if owner is
-   * null). align 'right' makes x the right edge.
+   * Draws text with its baseline at `y` (measured from the top of the page)
+   * and marks it as content of the tag `owner`, or as decoration if owner is
+   * null. Font 'R' is Geist Medium, 'B' is Geist SemiBold. align 'right'
+   * makes x the right edge.
    */
-  function text(doc, owner, x, top, str, { font = 'R', size = 11, fill = INK, align = 'left' } = {}) {
+  function text(doc, owner, x, y, str, { font = 'R', size = 11, fill = INK, align = 'left' } = {}) {
     const page = doc.page;
-    const drawX = align === 'right' ? x - width(str, font, size) : x;
+    const face = doc.fonts[font];
+    const drawX = align === 'right' ? x - width(face, str, size) : x;
+    const codes = glyphs(face, str).map(({ g, ch }) => {
+      if (!face.used.has(g)) face.used.set(g, ch);
+      return g.toString(16).padStart(4, '0');
+    }).join('').toUpperCase();
     const draw = 'BT /' + (font === 'B' ? 'F2' : 'F1') + ' ' + f(size) + ' Tf ' + color(fill) + ' rg 1 0 0 1 ' +
-      f(drawX) + ' ' + f(PAGE_H - top) + ' Tm ' + hex(str) + ' Tj ET';
+      f(drawX) + ' ' + f(PAGE_H - y) + ' Tm <' + codes + '> Tj ET';
     if (owner) {
       const mcid = page.mcids.length;
       page.mcids.push(owner);
@@ -159,18 +310,17 @@ const SenStatement = (() => {
   }
 
   /** A thin horizontal line (decoration). */
-  function rule(doc, top, x1 = LEFT, x2 = RIGHT, weight = 0.6, stroke = RULE) {
+  function rule(doc, y, x1 = LEFT, x2 = RIGHT, weight = 0.6, stroke = RULE) {
     doc.page.ops.push('/Artifact BMC q ' + color(stroke) + ' RG ' + f(weight) + ' w ' +
-      f(x1) + ' ' + f(PAGE_H - top) + ' m ' + f(x2) + ' ' + f(PAGE_H - top) + ' l S Q EMC');
+      f(x1) + ' ' + f(PAGE_H - y) + ' m ' + f(x2) + ' ' + f(PAGE_H - y) + ' l S Q EMC');
   }
 
-  /** A rounded rectangle outline or fill (decoration). */
-  function box(doc, x, top, w, h, r, { stroke, fill } = {}) {
+  /** The path of a rounded rectangle (top-left at x, top). */
+  function roundedPath(x, top, w, h, r) {
     const y = PAGE_H - top - h;
     const k = r * 0.5523; // how far bezier handles reach to draw a quarter circle
-    const path = [
-      f(x + r) + ' ' + f(y) + ' m',
-      f(x + w - r) + ' ' + f(y) + ' l',
+    return [
+      f(x + r) + ' ' + f(y) + ' m', f(x + w - r) + ' ' + f(y) + ' l',
       f(x + w - r + k) + ' ' + f(y) + ' ' + f(x + w) + ' ' + f(y + r - k) + ' ' + f(x + w) + ' ' + f(y + r) + ' c',
       f(x + w) + ' ' + f(y + h - r) + ' l',
       f(x + w) + ' ' + f(y + h - r + k) + ' ' + f(x + w - r + k) + ' ' + f(y + h) + ' ' + f(x + w - r) + ' ' + f(y + h) + ' c',
@@ -179,162 +329,181 @@ const SenStatement = (() => {
       f(x) + ' ' + f(y + r) + ' l',
       f(x) + ' ' + f(y + r - k) + ' ' + f(x + r - k) + ' ' + f(y) + ' ' + f(x + r) + ' ' + f(y) + ' c h',
     ].join(' ');
-    const paint = fill && stroke ? 'B' : fill ? 'f' : 'S';
-    doc.page.ops.push('/Artifact BMC q ' + (fill ? color(fill) + ' rg ' : '') + (stroke ? color(stroke) + ' RG 0.8 w ' : '') +
-      path + ' ' + paint + ' Q EMC');
   }
 
-  // -------------------------------------------------------------------------
-  // 1–3. Layout, drawing and tags
-  // -------------------------------------------------------------------------
+  /** A rounded rectangle outline (decoration). */
+  function box(doc, x, top, w, h, r) {
+    doc.page.ops.push('/Artifact BMC q ' + color(RULE) + ' RG 0.8 w ' + roundedPath(x, top, w, h, r) + ' S Q EMC');
+  }
 
-  /** The "sen" mark and app name at the top of every page (decoration). */
+  /** A category colour dot centred at (x, y) (decoration: the name is beside it). */
+  function dot(doc, x, y, category) {
+    const r = 3.2;
+    doc.page.ops.push('/Artifact BMC q ' + color(CATEGORY_COLORS[category] || MUTED) + ' rg ' +
+      roundedPath(x - r, y - r, r * 2, r * 2, r) + ' f Q EMC');
+  }
+
+  /** The "sen" logo and app name, top left of every page (decoration). */
   function brand(doc) {
-    box(doc, LEFT, 40, 26, 26, 7, { fill: [1, 0.94, 0.85], stroke: [0.93, 0.86, 0.78] });
-    text(doc, null, LEFT + 13 - width('sen', 'B', 9) / 2, 56.5, 'sen', { font: 'B', size: 9 });
-    text(doc, null, LEFT + 36, 57, 'Sen Tracker', { font: 'B', size: 12 });
+    if (doc.logo) {
+      doc.page.ops.push('/Artifact BMC q ' + roundedPath(LEFT, 42, 30, 30, 8.4) + ' W n 30 0 0 30 ' + f(LEFT) + ' ' +
+        f(PAGE_H - 72) + ' cm /Logo Do Q EMC');
+    }
+    text(doc, null, LEFT + 40, 62, 'Sen Tracker', { font: 'B', size: 15 });
   }
 
   /** The column positions of the "All Entries" table. */
-  const ENTRY_COLS = { date: LEFT, category: LEFT + 92, note: LEFT + 196, amountRight: RIGHT, noteWidth: RIGHT - 90 - (LEFT + 196) };
+  const COLS = { date: LEFT, dot: LEFT + 70, category: LEFT + 78, note: LEFT + 174, amount: RIGHT };
+  const NOTE_WIDTH = RIGHT - 84 - COLS.note;
+  const ROW = 25; // row height
 
   /** Draws the header row of "All Entries"; tagged once, decoration when repeated. */
   function entryHeader(doc, table, repeated) {
-    const top = doc.page.y;
+    const y = doc.page.y;
     const owner = repeated ? null : tag('TR', table);
-    const th = (label, x, align) => text(doc, owner ? tag('TH', owner, { Scope: 'Column' }) : null, x, top, label,
-      { font: 'B', size: 9, fill: MUTED, align });
-    th('Date', ENTRY_COLS.date);
-    th('Category', ENTRY_COLS.category);
-    th('Note', ENTRY_COLS.note);
-    th('Amount', ENTRY_COLS.amountRight, 'right');
-    rule(doc, top + 7, LEFT, RIGHT, 0.8, INK);
-    doc.page.y = top + 24;
+    const th = (label, x, align) => text(doc, owner ? tag('TH', owner, { Scope: 'Column' }) : null, x, y, label,
+      { font: 'B', size: 11, align });
+    th('Date', COLS.date);
+    th('Category', COLS.category - 8);
+    th('Note', COLS.note);
+    th('Amount', COLS.amount, 'right');
+    rule(doc, y + 9, LEFT, RIGHT, 0.9, INK);
+    doc.page.y = y + 9 + 17;
   }
 
   /** Lays out the whole statement. Returns the document (pages + tags). */
-  function layout({ month, monthLabel, email, entries, generatedAt }) {
-    const doc = newDocument();
+  function layout(options, resources) {
+    const { month, monthLabel, email, entries, generatedAt: now } = options;
+    const doc = { pages: [], root: tag('Document', null), fonts: resources.fonts, logo: resources.logo };
+    for (const face of Object.values(doc.fonts)) face.used = new Map();
+    addPage(doc);
     const root = doc.root;
     const [year, monthNumber] = month.split('-').map(Number);
     const monthName = MONTHS[monthNumber - 1];
     const lastDay = new Date(year, monthNumber, 0).getDate();
-    const now = generatedAt;
     const isCurrent = now.getFullYear() === year && now.getMonth() + 1 === monthNumber;
     const daysSoFar = isCurrent ? now.getDate() : lastDay;
     const total = sum(entries);
     const spendingDays = new Set(entries.map((e) => e.date)).size;
 
-    // --- Page 1 header ---
+    // --- Header: brand on the left, title on the right ---
     brand(doc);
-    text(doc, tag('H1', root), LEFT, 108, 'Monthly Statement', { font: 'B', size: 26 });
-    text(doc, tag('P', root), LEFT, 132, monthLabel, { size: 15, fill: MUTED });
+    text(doc, tag('H1', root), RIGHT, 64, 'Monthly Statement', { font: 'B', size: 21, align: 'right' });
+    text(doc, tag('P', root), RIGHT, 84, monthLabel, { size: 12.5, fill: MUTED, align: 'right' });
+    rule(doc, 100);
 
-    // Details in two columns: label above value, read as one paragraph each.
+    // --- Details: label above value, read as one paragraph each ---
     const details = [
-      ['Prepared for', email], ['Period', '1 to ' + lastDay + ' ' + monthName.slice(0, 3) + ' ' + year],
+      ['Prepared For', email], ['Period', '1 to ' + lastDay + ' ' + monthName.slice(0, 3) + ' ' + year],
       ['Generated', now.getDate() + ' ' + MONTHS[now.getMonth()].slice(0, 3) + ' ' + now.getFullYear() + ', ' + now.getHours() + ':' + pad2(now.getMinutes())],
       ['Currency', 'Malaysian Ringgit (RM)'],
     ];
     details.forEach(([label, value], i) => {
-      const x = i % 2 === 0 ? LEFT : LEFT + 260;
-      const top = 170 + Math.floor(i / 2) * 36;
+      const x = i % 2 === 0 ? LEFT : LEFT + 268;
+      const y = 122 + Math.floor(i / 2) * 40;
       const p = tag('P', root);
-      text(doc, p, x, top, label, { size: 9, fill: MUTED });
-      text(doc, p, x, top + 15, fit(value, 'B', 11, 240), { font: 'B', size: 11 });
+      text(doc, p, x, y, label, { size: 11, fill: MUTED });
+      text(doc, p, x, y + 16, fit(doc.fonts.B, value, 11.5, 250), { font: 'B', size: 11.5 });
     });
+    rule(doc, 194);
 
-    // Three summary boxes.
+    // --- Three summary boxes ---
     const boxW = (RIGHT - LEFT - 20) / 3;
-    [['Total Spent', rm(total)], ['Entries', String(entries.length)], ['Daily Average', rm(total / daysSoFar)]]
+    [['Total Spent', rm(total)], ['Entries', String(entries.length)], ['Daily Average', rm(total / spendingDays)]]
       .forEach(([label, value], i) => {
         const x = LEFT + i * (boxW + 10);
-        box(doc, x, 250, boxW, 62, 10, { stroke: RULE });
+        box(doc, x, 208, boxW, 60, 12);
         const p = tag('P', root);
-        text(doc, p, x + 14, 272, label, { size: 9, fill: MUTED });
-        text(doc, p, x + 14, 296, value, { font: 'B', size: 16 });
+        text(doc, p, x + 14, 228, label, { size: 10, fill: MUTED });
+        text(doc, p, x + 14, 254, value, { font: 'B', size: 18 });
       });
 
     // --- By Category ---
-    text(doc, tag('H2', root), LEFT, 350, 'By Category', { font: 'B', size: 14 });
+    text(doc, tag('H2', root), LEFT, 302, 'By Category', { font: 'B', size: 13 });
     const catTable = tag('Table', root);
-    const catCols = [[LEFT, 'Category', 'left'], [LEFT + 290, 'Entries', 'right'], [LEFT + 400, 'Amount', 'right'], [RIGHT, 'Share', 'right']];
-    let top = 376;
+    const catCols = [[LEFT, 'Category', 'left'], [LEFT + 350, 'Entries', 'right'], [LEFT + 446, 'Amount', 'right'], [RIGHT, 'Share', 'right']];
+    let y = 328;
     const headRow = tag('TR', catTable);
-    catCols.forEach(([x, label, align]) => text(doc, tag('TH', headRow, { Scope: 'Column' }), x, top, label, { font: 'B', size: 9, fill: MUTED, align }));
-    rule(doc, top + 7, LEFT, RIGHT, 0.8, INK);
-    top += 24;
+    catCols.forEach(([x, label, align]) => text(doc, tag('TH', headRow, { Scope: 'Column' }), x, y, label, { font: 'B', size: 11, align }));
+    rule(doc, y + 9, LEFT, RIGHT, 0.9, INK);
+    y += 9 + 17;
     const categories = CATEGORIES.map((name) => {
       const list = entries.filter((e) => e.category === name);
       return { name, n: list.length, amount: sum(list) };
     }).filter((c) => c.n > 0).sort((a, b) => b.amount - a.amount);
     for (const c of categories) {
       const row = tag('TR', catTable);
-      const cells = [c.name, String(c.n), rm(c.amount), Math.round((c.amount / total) * 100) + '%'];
-      cells.forEach((value, i) => text(doc, tag('TD', row), catCols[i][0], top, value, { size: 10.5, align: catCols[i][2] }));
-      rule(doc, top + 8);
-      top += 22;
+      dot(doc, LEFT + 4, y - 3.8, c.name);
+      text(doc, tag('TD', row), LEFT + 14, y, c.name, { size: 11 });
+      text(doc, tag('TD', row), catCols[1][0], y, String(c.n), { size: 11, align: 'right' });
+      text(doc, tag('TD', row), catCols[2][0], y, rm(c.amount), { size: 11, align: 'right' });
+      text(doc, tag('TD', row), RIGHT, y, Math.round((c.amount / total) * 100) + '%', { size: 11, align: 'right' });
+      rule(doc, y + 10);
+      y += ROW;
     }
 
-    // --- All Entries (continues onto more pages as needed) ---
-    top += 22;
-    text(doc, tag('H2', root), LEFT, top, 'All Entries', { font: 'B', size: 14 });
-    doc.page.y = top + 26;
+    // --- All Entries (newest first; continues onto more pages as needed) ---
+    y += 14;
+    text(doc, tag('H2', root), LEFT, y, 'All Entries', { font: 'B', size: 13 });
+    doc.page.y = y + 26;
     const entryTable = tag('Table', root);
     entryHeader(doc, entryTable, false);
 
     for (const e of entries) {
-      if (doc.page.y + 22 > BOTTOM_LIMIT) {
+      if (doc.page.y + 12 > BOTTOM_LIMIT) {
         // New page: repeat the header so each page makes sense on its own.
         // The repeats are decoration: the table is still one table.
         addPage(doc);
         brand(doc);
-        text(doc, null, LEFT, 100, 'Monthly Statement', { font: 'B', size: 18 });
-        text(doc, null, LEFT, 120, monthLabel + ' · continued', { size: 12, fill: MUTED });
-        text(doc, null, LEFT, 156, 'All Entries, continued', { font: 'B', size: 14 });
-        doc.page.y = 182;
+        text(doc, null, RIGHT, 64, 'Monthly Statement', { font: 'B', size: 21, align: 'right' });
+        text(doc, null, RIGHT, 84, monthLabel + ' · Continued', { size: 12.5, fill: MUTED, align: 'right' });
+        text(doc, null, LEFT, 126, 'All Entries, Continued', { font: 'B', size: 13 });
+        doc.page.y = 152;
         entryHeader(doc, entryTable, true);
       }
-      const y = doc.page.y;
+      const rowY = doc.page.y;
       const row = tag('TR', entryTable);
-      text(doc, tag('TD', row), ENTRY_COLS.date, y, dayLabel(e.date), { size: 10 });
-      text(doc, tag('TD', row), ENTRY_COLS.category, y, e.category, { size: 10 });
-      text(doc, tag('TD', row), ENTRY_COLS.note, y, fit(e.note || '—', 'R', 10, ENTRY_COLS.noteWidth), { size: 10, fill: e.note ? INK : MUTED });
-      text(doc, tag('TD', row), ENTRY_COLS.amountRight, y, rm(e.amount), { size: 10, align: 'right' });
-      rule(doc, y + 8);
-      doc.page.y = y + 22;
+      text(doc, tag('TD', row), COLS.date, rowY, shortDate(e.date), { size: 11, fill: MUTED });
+      dot(doc, COLS.dot, rowY - 3.8, e.category);
+      text(doc, tag('TD', row), COLS.category, rowY, e.category, { size: 11 });
+      text(doc, tag('TD', row), COLS.note, rowY, fit(doc.fonts.R, e.note || '—', 11, NOTE_WIDTH), { size: 11, fill: e.note ? INK : MUTED });
+      text(doc, tag('TD', row), COLS.amount, rowY, rm(e.amount), { size: 11, align: 'right' });
+      rule(doc, rowY + 10);
+      doc.page.y = rowY + ROW;
     }
 
-    // --- Totals, closing the statement ---
-    if (doc.page.y + 110 > BOTTOM_LIMIT) {
+    // --- Totals on the right, closing the statement ---
+    if (doc.page.y + 120 > BOTTOM_LIMIT) {
       addPage(doc);
       brand(doc);
-      doc.page.y = 100;
+      doc.page.y = 110;
     }
-    top = doc.page.y + 14;
-    rule(doc, top - 4, LEFT, RIGHT, 0.8, INK);
-    const totals = [['Entries', String(entries.length)], ['Days with spending', spendingDays + ' of ' + daysSoFar],
-                    ['Total for ' + monthName, rm(total)]];
+    y = doc.page.y + 14;
+    const totalsX = LEFT + 252;
+    const totals = [['Entries', String(entries.length)], ['Days with Spending', spendingDays + ' of ' + daysSoFar]];
     totals.forEach(([label, value], i) => {
       const p = tag('P', root);
-      const bold = i === totals.length - 1;
-      text(doc, p, LEFT, top + 16 + i * 20, label, { size: 11, font: bold ? 'B' : 'R', fill: bold ? INK : MUTED });
-      text(doc, p, RIGHT, top + 16 + i * 20, value, { size: 11, font: 'B', align: 'right' });
+      text(doc, p, totalsX, y + i * 27, label, { size: 11.5, fill: MUTED });
+      text(doc, p, RIGHT, y + i * 27, value, { size: 11.5, align: 'right' });
     });
-    text(doc, tag('P', root), LEFT, top + 92, 'This statement is for your own records. It is not a bank statement.', { size: 9, fill: MUTED });
+    rule(doc, y + 40, totalsX, RIGHT, 0.9, INK);
+    const final = tag('P', root);
+    text(doc, final, totalsX, y + 66, 'Total for ' + monthName, { font: 'B', size: 12 });
+    text(doc, final, RIGHT, y + 66, rm(total), { font: 'B', size: 12, align: 'right' });
+    text(doc, tag('P', root), LEFT, y + 112, 'This statement is for your own records. It is not a bank statement.', { size: 11, fill: MUTED });
 
     // --- Footer on every page (decoration) ---
     doc.pages.forEach((page, i) => {
       doc.page = page;
-      rule(doc, PAGE_H - 48);
-      text(doc, null, LEFT, PAGE_H - 32, 'Receipt photos and unsaved entries are not included.', { size: 8.5, fill: MUTED });
-      text(doc, null, RIGHT, PAGE_H - 32, 'Page ' + (i + 1) + ' of ' + doc.pages.length, { size: 8.5, fill: MUTED, align: 'right' });
+      rule(doc, PAGE_H - 58);
+      text(doc, null, LEFT, PAGE_H - 38, 'Receipt photos and unsaved entries are not included.', { size: 10, fill: MUTED });
+      text(doc, null, RIGHT, PAGE_H - 38, 'Page ' + (i + 1) + ' of ' + doc.pages.length, { size: 10, fill: MUTED, align: 'right' });
     });
     return doc;
   }
 
   // -------------------------------------------------------------------------
-  // 4. Writing the file
+  // 5. Writing the file
   // -------------------------------------------------------------------------
 
   /** A PDF text string in (brackets), with \, ( and ) escaped. ASCII only. */
@@ -342,34 +511,86 @@ const SenStatement = (() => {
     return '(' + String(textValue).replace(/[^\x20-\x7e]/g, '?').replace(/([\\()])/g, '\\$1') + ')';
   }
 
+  /**
+   * The "ToUnicode" map for a font: which character each glyph stands for,
+   * so copying text and screen readers get real letters, not glyph numbers.
+   */
+  function toUnicode(font) {
+    const lines = [];
+    const entries = [...font.used.entries()];
+    for (let i = 0; i < entries.length; i += 100) {
+      const chunk = entries.slice(i, i + 100);
+      lines.push(chunk.length + ' beginbfchar');
+      for (const [g, ch] of chunk) {
+        const units = [];
+        for (let k = 0; k < ch.length; k++) units.push(ch.charCodeAt(k).toString(16).padStart(4, '0'));
+        lines.push('<' + g.toString(16).padStart(4, '0') + '> <' + units.join('') + '>');
+      }
+      lines.push('endbfchar');
+    }
+    return '/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n' +
+      '/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n' +
+      '1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n' + lines.join('\n') +
+      '\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend';
+  }
+
   /** Joins everything into the bytes of a PDF file. */
   function write(doc, title) {
-    const objects = [];                       // objects[n - 1] = text of object n
-    const reserve = () => objects.push(null); // get the next object number
+    const objects = [];                       // objects[n - 1] = text or bytes of object n
+    const reserve = () => objects.push(null); // the next object number
     const set = (n, body) => { objects[n - 1] = body; };
     const ref = (n) => n + ' 0 R';
+    const encoder = new TextEncoder();
+    const stream = (dict, data) => [encoder.encode('<< ' + dict + ' /Length ' + data.length + ' >>\nstream\n'), data, encoder.encode('\nendstream')];
 
     const catalog = reserve();
     const pagesObj = reserve();
-    const fontR = reserve();
-    const fontB = reserve();
     const info = reserve();
     const treeRoot = reserve();
     const parentTree = reserve();
-    set(fontR, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
-    set(fontB, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>');
+
+    // Fonts: each is a "Type0" font pointing to the embedded TrueType subset.
+    const fontRefs = {};
+    Object.entries(doc.fonts).forEach(([key, face], i) => {
+      const type0 = reserve();
+      const cid = reserve();
+      const descriptor = reserve();
+      const file = reserve();
+      const cmap = reserve();
+      const baseName = 'SENAA' + String.fromCharCode(65 + i) + '+' + face.name;
+      const scale = 1000 / face.unitsPerEm;
+      const widths = [...face.used.keys()].sort((a, b) => a - b).map((g) => g + ' [' + Math.round(face.advances[g] * scale) + ']').join(' ');
+      const subset = subsetFont(face);
+      set(file, stream('/Length1 ' + subset.length, subset));
+      set(descriptor, '<< /Type /FontDescriptor /FontName /' + baseName + ' /Flags 32 /FontBBox [' +
+        face.bbox.map((v) => Math.round(v * scale)).join(' ') + '] /ItalicAngle 0 /Ascent ' + Math.round(face.ascent * scale) +
+        ' /Descent ' + Math.round(face.descent * scale) + ' /CapHeight ' + Math.round(face.capHeight * scale) +
+        ' /StemV 80 /FontFile2 ' + ref(file) + ' >>');
+      set(cid, '<< /Type /Font /Subtype /CIDFontType2 /BaseFont /' + baseName +
+        ' /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor ' + ref(descriptor) +
+        ' /CIDToGIDMap /Identity /DW 500 /W [' + widths + '] >>');
+      set(cmap, stream('', encoder.encode(toUnicode(face))));
+      set(type0, '<< /Type /Font /Subtype /Type0 /BaseFont /' + baseName + ' /Encoding /Identity-H /DescendantFonts [' +
+        ref(cid) + '] /ToUnicode ' + ref(cmap) + ' >>');
+      fontRefs[key === 'B' ? 'F2' : 'F1'] = type0;
+    });
+
+    // The logo: a JPEG image.
+    let logoRef = null;
+    if (doc.logo) {
+      logoRef = reserve();
+      set(logoRef, stream('/Type /XObject /Subtype /Image /Width ' + doc.logo.width + ' /Height ' + doc.logo.height +
+        ' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode', doc.logo.bytes));
+    }
 
     // Pages and their drawing instructions.
-    doc.pages.forEach((page) => {
-      page.obj = reserve();
-      page.contents = reserve();
-    });
+    doc.pages.forEach((page) => { page.obj = reserve(); page.contents = reserve(); });
+    const resources = '<< /Font << /F1 ' + ref(fontRefs.F1) + ' /F2 ' + ref(fontRefs.F2) + ' >>' +
+      (logoRef ? ' /XObject << /Logo ' + ref(logoRef) + ' >>' : '') + ' >>';
     doc.pages.forEach((page, i) => {
-      const stream = page.ops.join('\n');
-      set(page.contents, '<< /Length ' + stream.length + ' >>\nstream\n' + stream + '\nendstream');
+      set(page.contents, stream('', encoder.encode(page.ops.join('\n'))));
       set(page.obj, '<< /Type /Page /Parent ' + ref(pagesObj) + ' /MediaBox [0 0 ' + PAGE_W + ' ' + PAGE_H + ']' +
-        ' /Resources << /Font << /F1 ' + ref(fontR) + ' /F2 ' + ref(fontB) + ' >> >>' +
-        ' /Contents ' + ref(page.contents) + ' /StructParents ' + i + ' /Tabs /S >>');
+        ' /Resources ' + resources + ' /Contents ' + ref(page.contents) + ' /StructParents ' + i + ' /Tabs /S >>');
     });
     set(pagesObj, '<< /Type /Pages /Kids [' + doc.pages.map((p) => ref(p.obj)).join(' ') + '] /Count ' + doc.pages.length + ' >>');
 
@@ -397,35 +618,78 @@ const SenStatement = (() => {
     set(catalog, '<< /Type /Catalog /Pages ' + ref(pagesObj) + ' /StructTreeRoot ' + ref(treeRoot) +
       ' /MarkInfo << /Marked true >> /Lang (en-MY) /ViewerPreferences << /DisplayDocTitle true >> >>');
 
-    // Join, noting where each object starts (all text is ASCII, so
-    // characters = bytes), then the table of positions ("xref").
-    let out = '%PDF-1.7\n';
+    // Join, noting the byte position where each object starts, then the
+    // table of positions ("xref") that lets a reader jump to any object.
+    const parts = [encoder.encode('%PDF-1.7\n%âã\n')];
+    let length = parts[0].length;
+    const add = (piece) => { const bytes = typeof piece === 'string' ? encoder.encode(piece) : piece; parts.push(bytes); length += bytes.length; };
     const offsets = [];
     objects.forEach((body, i) => {
-      offsets.push(out.length);
-      out += (i + 1) + ' 0 obj\n' + body + '\nendobj\n';
+      offsets.push(length);
+      add((i + 1) + ' 0 obj\n');
+      (Array.isArray(body) ? body : [body]).forEach(add);
+      add('\nendobj\n');
     });
-    const xref = out.length;
-    out += 'xref\n0 ' + (objects.length + 1) + '\n0000000000 65535 f \n' +
+    const xref = length;
+    add('xref\n0 ' + (objects.length + 1) + '\n0000000000 65535 f \n' +
       offsets.map((o) => String(o).padStart(10, '0') + ' 00000 n \n').join('') +
-      'trailer\n<< /Size ' + (objects.length + 1) + ' /Root ' + ref(catalog) + ' /Info ' + ref(info) + ' >>\nstartxref\n' + xref + '\n%%EOF\n';
-    return new TextEncoder().encode(out);
+      'trailer\n<< /Size ' + (objects.length + 1) + ' /Root ' + ref(catalog) + ' /Info ' + ref(info) + ' >>\nstartxref\n' + xref + '\n%%EOF\n');
+    return joinBytes(parts);
+  }
+
+  // -------------------------------------------------------------------------
+  // Public functions
+  // -------------------------------------------------------------------------
+
+  let loading = null;
+
+  /**
+   * Loads what every statement needs, once: the two Geist font files and the
+   * app icon (drawn onto white and saved as a JPEG for the PDF).
+   */
+  function load() {
+    if (!loading) {
+      const fetchFont = (file, name) => fetch(file).then((r) => {
+        if (!r.ok) throw new Error('Could not load ' + file);
+        return r.arrayBuffer();
+      }).then((buffer) => readFont(new Uint8Array(buffer), name));
+      const logo = new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const size = 120;
+          const canvas = document.createElement('canvas');
+          canvas.width = size;
+          canvas.height = size;
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(0, 0, size, size);
+          ctx.drawImage(img, 0, 0, size, size);
+          canvas.toBlob((blob) => blob.arrayBuffer().then((b) => resolve({ bytes: new Uint8Array(b), width: size, height: size })), 'image/jpeg', 0.92);
+        };
+        img.onerror = () => resolve(null); // no logo is better than no statement
+        img.src = 'icons/icon-192.png';
+      });
+      loading = Promise.all([fetchFont('fonts/Geist-Medium.ttf', 'Geist-Medium'), fetchFont('fonts/Geist-SemiBold.ttf', 'Geist-SemiBold'), logo])
+        .then(([R, B, logoImage]) => ({ fonts: { R, B }, logo: logoImage }))
+        .catch((err) => { loading = null; throw err; });
+    }
+    return loading;
   }
 
   /**
-   * Builds the statement. entries must be the month's saved entries, oldest
-   * first. Returns the file's bytes, its page count and a file name like
-   * "sen-tracker-nov-2026.pdf".
+   * Builds the statement. entries: the month's saved entries, newest first.
+   * resources: the result of load(). Returns the file's bytes, its page
+   * count and a file name like "sen-tracker-nov-2026.pdf".
    */
-  function build(options) {
-    const doc = layout(options);
+  function build(options, resources) {
+    const doc = layout(options, resources);
     const [year, monthNumber] = options.month.split('-').map(Number);
     return {
-      bytes: write(doc, 'Sen Tracker statement, ' + options.monthLabel),
+      bytes: write(doc, 'Sen Tracker Statement, ' + options.monthLabel),
       pages: doc.pages.length,
       fileName: 'sen-tracker-' + MONTHS[monthNumber - 1].slice(0, 3).toLowerCase() + '-' + year + '.pdf',
     };
   }
 
-  return { build };
+  return { load, build, readFont };
 })();
