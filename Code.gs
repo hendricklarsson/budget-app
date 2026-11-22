@@ -1,9 +1,9 @@
 /**
- * Budget Tracker — backend (Google Apps Script)
+ * Sen Tracker — backend (Google Apps Script)
  * ==============================================
  *
  * This file is pasted into the Apps Script editor attached to the
- * "Budget App DB" Google Sheet (Extensions → Apps Script). It is deployed as a
+ * app's Google Sheet, e.g. "Sen Tracker DB" (Extensions → Apps Script). It is deployed as a
  * web app with "Execute as: Me" and "Who has access: Anyone".
  *
  * HOW A REQUEST WORKS
@@ -25,7 +25,7 @@
  *                    can use the app. Set it to a list of emails separated by
  *                    commas to make the app invite-only.
  *   SPREADSHEET_ID — written by setup().
- *   FOLDER_ID      — written by setup() (the "Budget App Receipts" folder).
+ *   FOLDER_ID      — written by setup() (the "Sen Tracker Receipts" folder).
  *   usage:...      — written automatically: today's counts for the daily limits.
  */
 
@@ -34,7 +34,9 @@
 // ---------------------------------------------------------------------------
 
 const SHEET_NAME = 'Expenses';
-const FOLDER_NAME = 'Budget App Receipts';
+// Only used when setup() has to create the folder. After that the folder is
+// found by its saved ID, so renaming it in Drive is safe.
+const FOLDER_NAME = 'Sen Tracker Receipts';
 
 // Column order in the sheet. Change it here and nowhere else.
 const HEADERS = ['id', 'email', 'date', 'amount', 'category', 'note',
@@ -69,7 +71,7 @@ const MAX_RECEIPTS_ALL_USERS_PER_DAY = 1000; // at most ~2 GB a day, usually ~15
 
 /**
  * Creates the "Expenses" tab with its header row and column formats, creates
- * (or finds) the private "Budget App Receipts" Drive folder, and stores both
+ * (or finds) the private "Sen Tracker Receipts" Drive folder, and stores both
  * IDs in Script Properties.
  *
  * Why store IDs: the web app runs without an "active" spreadsheet in some
@@ -128,7 +130,7 @@ function setup() {
  */
 function doGet() {
   return ContentService.createTextOutput(
-    'Budget Tracker API is running. The app talks to it with POST requests.');
+    'Sen Tracker API is running. The app talks to it with POST requests.');
 }
 
 /**

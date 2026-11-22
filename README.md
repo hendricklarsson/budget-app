@@ -1,6 +1,6 @@
 # Sen Tracker
 
-A free, installable budget app (in RM). Sign in with Google, log your spending,
+A free, installable spending tracker (in RM). Sign in with Google, log your spending,
 and see monthly totals by category. Entries are stored in a Google Sheet and
 receipts in Google Drive, with an Apps Script backend. Running cost: RM0.
 

@@ -31,8 +31,8 @@ const CATEGORIES = ['Food', 'Transport', 'Bills', 'Shopping', 'Health', 'Enterta
 const MAX_AMOUNT = 1000000;
 const MAX_NOTE_LENGTH = 200;
 
-const TOKEN_KEY = 'budget.session';            // where the sign-in is kept
-const CACHE_PREFIX = 'budget.expenses.';       // + email: one cache per user
+const TOKEN_KEY = 'sen.session';               // where the sign-in is kept
+const CACHE_PREFIX = 'sen.expenses.';          // + email: one cache per user
 const PENDING_DELETE_PREFIX = 'sen.pendingDelete.'; // + email: deletes not sent yet
 const LAST_CATEGORY_KEY = 'sen.lastCategory';  // the category used last time
 const EXPIRY_MARGIN_MS = 60 * 1000;            // treat tokens as expired 1 min early
@@ -218,6 +218,7 @@ function makeId() {
  */
 function start() {
   registerServiceWorker();
+  moveOldStorage();
 
   if (CLIENT_ID.startsWith('PASTE_') || SCRIPT_URL.startsWith('PASTE_')) {
     showSignIn('Setup needed: put your Client ID and Script URL in config.js.', 'error');
@@ -258,6 +259,24 @@ function start() {
     showApp();
   } else {
     showSignIn();
+  }
+}
+
+/**
+ * The app used to be called Budget Tracker and stored things under
+ * "budget.…" names. This moves them to the "sen.…" names once, so nobody is
+ * signed out or loses their saved entries after the rename.
+ */
+function moveOldStorage() {
+  try {
+    for (const key of Object.keys(localStorage)) {
+      if (!key.startsWith('budget.')) continue;
+      const newKey = 'sen.' + key.slice('budget.'.length);
+      if (localStorage.getItem(newKey) === null) localStorage.setItem(newKey, localStorage.getItem(key));
+      localStorage.removeItem(key);
+    }
+  } catch (err) {
+    // storage blocked or full: nothing to move
   }
 }
 
