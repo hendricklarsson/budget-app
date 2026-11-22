@@ -1,166 +1,181 @@
 <!doctype html>
-<html lang="en">
+<html lang="en-MY">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Budget Tracker</title>
-  <meta name="description" content="Track your daily spending in RM.">
+  <title>Sen Tracker</title>
+  <meta name="description" content="Know where every ringgit goes, in plain words.">
+  <link rel="preload" href="fonts/Geist-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="style.css">
 
   <!-- Installable app: name, icons and colours for phones. -->
   <link rel="manifest" href="manifest.json">
   <link rel="icon" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <meta name="apple-mobile-web-app-title" content="Budget">
-  <meta name="theme-color" content="#1a7f5a" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#1f2226" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-title" content="Sen">
+  <meta name="theme-color" content="#f4f5f8">
+
   <!-- "defer" runs the scripts in this order after the page is parsed:
-       Google's sign-in library first, then our settings, then our app. -->
+       Google's sign-in library, our settings, the PDF statement maker, the app. -->
   <script src="https://accounts.google.com/gsi/client" defer></script>
   <script src="config.js" defer></script>
+  <script src="statement.js" defer></script>
   <script src="app.js" defer></script>
 </head>
-<body>
+<body data-mesh="sunrise">
 
-  <!-- Sign-in screen: shown when nobody is signed in. -->
+  <!-- The coloured mesh behind every screen. app.js sets body[data-mesh]. -->
+  <div class="mesh" aria-hidden="true"></div>
+
+  <!-- ================= Sign In ================= -->
   <main id="signin-screen" class="signin" hidden>
-    <h1>Budget Tracker</h1>
-    <p class="tagline">Track your daily spending in RM.</p>
-    <p id="signin-message" class="message" hidden></p>
-    <div id="google-button" class="google-button"></div>
-    <p class="privacy">
-      This is a personal portfolio project. Your entries are stored in the
-      developer's Google Sheet and your receipts in the developer's Google
-      Drive. Only you can see your data in the app. You can delete all of it
-      at any time from Settings.
-      <a href="privacy.html">Privacy policy</a>
-    </p>
+    <div class="brand"><span class="mark" aria-hidden="true">sen</span>Sen Tracker</div>
+
+    <h1 class="display">Know where every ringgit <span class="sub">goes, in plain words.</span></h1>
+
+    <div class="signin-intro">
+      <p class="label">For everyday spending</p>
+      <p>Add what you spend. See it by day, month and year.</p>
+    </div>
+
+    <!-- An illustration of the app, not real data, so screen readers skip it. -->
+    <div class="signin-preview" aria-hidden="true">
+      <div class="glass">
+        <div class="preview-label">Spent today</div>
+        <div class="panel preview-panel">
+          <div class="preview-amount">RM 46.30</div>
+          <div class="preview-bar"><span></span></div>
+          <div class="caption">3 entries</div>
+        </div>
+      </div>
+      <div class="glass">
+        <div class="preview-label">Top this month</div>
+        <div class="preview-bars">
+          <span style="height:100%;background:#0b0d12"></span>
+          <span style="height:80%;background:#8f877d"></span>
+          <span style="height:48%;background:#b5aa9b"></span>
+          <span style="height:36%;background:#d7c9b5"></span>
+        </div>
+        <div class="preview-label">Food, 32%</div>
+      </div>
+    </div>
+
+    <div class="signin-bottom">
+      <div id="signin-message" class="banner" hidden></div>
+      <div id="google-button" class="google-button"></div>
+      <p class="signin-foot">
+        <span>We use Google only to sign you in.</span>
+        <a href="privacy.html">Privacy</a>
+      </p>
+    </div>
   </main>
 
-  <!-- The app itself: shown after sign-in. One <section> per screen;
-       app.js shows one at a time when a tab at the bottom is tapped. -->
-  <div id="app-screen" class="app" hidden>
-    <main class="content">
-      <p id="status" class="message" hidden></p>
+  <!-- ================= The app (after sign-in) ================= -->
+  <div id="app-screen" hidden>
+    <main id="app-main" class="app">
 
-      <!-- Add -->
-      <section id="screen-add" class="view">
-        <h2>Add expense</h2>
-        <form id="add-form" class="form" novalidate>
-          <label for="amount">Amount (RM)</label>
-          <input id="amount" type="number" inputmode="decimal" step="0.01" min="0.01"
-                 max="1000000" placeholder="0.00" autocomplete="off" required>
+      <!-- Overview: filled in by renderOverview() in app.js -->
+      <section id="screen-overview" class="screen" aria-labelledby="overview-title" hidden></section>
 
-          <label for="category">Category</label>
-          <select id="category" required></select>
+      <!-- History: filled in by renderHistory() -->
+      <section id="screen-history" class="screen" aria-labelledby="history-title" hidden></section>
 
-          <label for="date">Date</label>
-          <input id="date" type="date" required>
+      <!-- Settings: filled in by renderSettings() -->
+      <section id="screen-settings" class="screen" aria-labelledby="settings-title" hidden></section>
 
-          <label for="note">Note <span class="muted">(optional)</span></label>
-          <input id="note" type="text" maxlength="200" placeholder="e.g. Lunch with team"
-                 autocomplete="off">
+      <!-- Add Expense and Edit Expense share this one form. -->
+      <section id="screen-form" class="screen" aria-labelledby="form-title" hidden>
+        <div id="form-top" class="form-head-top" hidden>
+          <button id="form-cancel" type="button" class="btn btn-secondary btn-small">Cancel</button>
+        </div>
+        <div class="screen-head">
+          <h1 id="form-title" class="title">Add Expense <span id="form-subtitle" class="sub"></span></h1>
+        </div>
 
-          <!-- accept="image/*" lets phones offer the camera or the photo library. -->
-          <label for="receipt-input">Receipt photo <span class="muted">(optional)</span></label>
-          <input id="receipt-input" type="file" accept="image/*">
-          <div id="receipt-preview" class="receipt-preview" hidden>
-            <img id="receipt-thumb" alt="Receipt preview">
-            <button id="receipt-remove" type="button" class="small-button danger">Remove photo</button>
+        <form id="expense-form" class="form" novalidate>
+          <div id="form-banner" class="banner banner-error" role="alert" hidden></div>
+
+          <div class="form-section">
+            <label for="amount" class="field-label">Amount</label>
+            <div id="amount-panel" class="amount-panel">
+              <span class="currency" aria-hidden="true">RM</span>
+              <input id="amount" class="amount-input" type="text" inputmode="decimal"
+                     autocomplete="off" placeholder="0.00" aria-describedby="amount-error">
+            </div>
+            <p id="amount-error" class="field-error" hidden>Type an amount first.</p>
           </div>
 
-          <p id="form-error" class="field-error" role="alert" hidden></p>
-          <button type="submit" class="primary-button">Add expense</button>
+          <div class="form-section">
+            <p id="category-label" class="field-label">Category</p>
+            <!-- A radio group of chips, built by app.js from CATEGORIES. -->
+            <div id="category-chips" class="chips" role="radiogroup" aria-labelledby="category-label"></div>
+          </div>
+
+          <div class="panel details">
+            <div class="details-row">
+              <span id="date-icon"></span>
+              <span id="date-label" class="grow">Today</span>
+              <button id="date-change" type="button" class="link-button">Change<span class="visually-hidden"> date</span></button>
+              <input id="date" type="date" class="visually-hidden" tabindex="-1" aria-label="Date">
+            </div>
+
+            <button id="details-toggle" type="button" class="details-row" aria-expanded="false" aria-controls="details-open">
+              <span id="details-icon"></span>
+              <span class="grow">Note or Photo</span>
+              <span id="details-chevron"></span>
+            </button>
+
+            <div id="details-open" class="details-open" hidden>
+              <div>
+                <label for="note" class="field-label">Note <span id="note-count" class="count">0 of 200</span></label>
+                <input id="note" class="text-input" type="text" maxlength="200" autocomplete="off"
+                       placeholder="e.g. Grab to KLCC">
+              </div>
+              <div>
+                <p class="field-label">Photo</p>
+                <div class="photo-row">
+                  <img id="photo-thumb" class="photo-thumb" alt="Receipt photo" hidden>
+                  <!-- The real file picker is hidden; the buttons open it. -->
+                  <input id="photo-input" type="file" accept="image/*" class="visually-hidden" tabindex="-1">
+                  <button id="photo-add" type="button" class="btn btn-secondary btn-small">Add Photo</button>
+                  <button id="photo-replace" type="button" class="btn btn-secondary btn-small" hidden>Replace</button>
+                  <button id="photo-remove" type="button" class="btn btn-secondary btn-small is-danger" hidden>Remove Photo</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <button id="save-button" type="submit" class="btn btn-primary btn-block">Save</button>
         </form>
-      </section>
-
-      <!-- History -->
-      <section id="screen-history" class="view" hidden>
-        <div class="section-head">
-          <h2>History</h2>
-          <button id="refresh-button" type="button" class="link-button">Refresh</button>
-        </div>
-        <div id="history-list"></div>
-        <p id="empty-list" class="muted" hidden>No entries yet. Add your first expense.</p>
-      </section>
-
-      <!-- Summary -->
-      <section id="screen-summary" class="view" hidden>
-        <h2>Summary</h2>
-        <div class="month-picker">
-          <button id="prev-month" type="button" class="icon-button" aria-label="Previous month">‹</button>
-          <span id="month-label" class="month-label"></span>
-          <button id="next-month" type="button" class="icon-button" aria-label="Next month">›</button>
-        </div>
-        <div class="card total-card">
-          <div class="muted">Total spent</div>
-          <div id="month-total" class="total-amount"></div>
-          <div id="month-count" class="muted"></div>
-        </div>
-        <ul id="category-totals" class="category-totals"></ul>
-      </section>
-
-      <!-- Settings -->
-      <section id="screen-settings" class="view" hidden>
-        <h2>Settings</h2>
-        <div class="card">
-          <div class="muted">Signed in as</div>
-          <div id="user-email" class="user-email"></div>
-        </div>
-        <button id="signout-button" type="button" class="secondary-button">Sign out</button>
-
-        <div class="card danger-zone">
-          <h3>Your data</h3>
-          <p class="muted">
-            Permanently remove all your entries and receipt photos from this
-            app. This can't be undone.
-          </p>
-          <button id="delete-data-button" type="button" class="danger-button">Delete my data</button>
-        </div>
-        <p class="muted small"><a href="privacy.html">Privacy policy</a></p>
       </section>
     </main>
 
-    <!-- Tabs at the bottom, like a phone app. -->
-    <nav class="tabbar" aria-label="Screens">
-      <button type="button" data-screen="add">Add</button>
-      <button type="button" data-screen="history">History</button>
-      <button type="button" data-screen="summary">Summary</button>
-      <button type="button" data-screen="settings">Settings</button>
+    <!-- Navigation: three tabs in a glass pill, plus a separate Add button. -->
+    <nav id="tabbar" class="tabbar" aria-label="Main">
+      <div class="tabs glass">
+        <button type="button" class="tab" data-screen="overview"><span data-icon="home"></span>Home</button>
+        <button type="button" class="tab" data-screen="history"><span data-icon="history"></span>History</button>
+        <button type="button" class="tab" data-screen="settings"><span data-icon="settings"></span>Settings</button>
+      </div>
+      <button type="button" class="btn btn-primary add-tab" data-screen="add"><span data-icon="plus"></span>Add</button>
     </nav>
 
-    <!-- Short pop-up messages such as "Saved". -->
+    <!-- Replaces the tabs while choosing entries in History. -->
+    <div id="selectbar" class="selectbar" hidden>
+      <div class="glass">
+        <button id="delete-selected" type="button" class="btn btn-secondary is-danger btn-block" disabled>Select Entries First</button>
+      </div>
+    </div>
+
+    <!-- Short messages, e.g. "2 entries deleted · Undo". -->
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   </div>
 
-  <!-- Pop-up windows. <dialog> is built into browsers: showModal() opens it
-       on top of the page, and the Escape key closes it. -->
-
-  <!-- Receipt viewer -->
-  <dialog id="receipt-dialog" class="dialog">
-    <p id="receipt-status" class="muted"></p>
-    <img id="receipt-image" class="receipt-image" alt="Receipt photo" hidden>
-    <button id="receipt-close" type="button" class="secondary-button">Close</button>
-  </dialog>
-
-  <!-- "Delete my data" confirmation: the user must type DELETE. -->
-  <dialog id="delete-dialog" class="dialog">
-    <h2>Delete all your data?</h2>
-    <p>
-      This removes every entry and receipt photo you've added. It can't be
-      undone, and you'll be signed out.
-    </p>
-    <div class="form">
-      <label for="delete-confirm-input">Type DELETE to confirm</label>
-      <input id="delete-confirm-input" type="text" autocomplete="off" autocapitalize="characters"
-             spellcheck="false">
-    </div>
-    <p id="delete-error" class="field-error" role="alert" hidden></p>
-    <div class="dialog-buttons">
-      <button id="delete-cancel" type="button" class="secondary-button">Cancel</button>
-      <button id="delete-confirm" type="button" class="danger-button" disabled>Delete all</button>
-    </div>
-  </dialog>
+  <!-- ================= Pop-ups =================
+       <dialog> is built into browsers: showModal() opens it on top of the
+       page, and the Escape key closes it. app.js fills in each one. -->
+  <dialog id="sheet" class="sheet" aria-labelledby="sheet-title"></dialog>
+  <dialog id="receipt-viewer" class="viewer" aria-labelledby="viewer-title"></dialog>
 
 </body>
 </html>

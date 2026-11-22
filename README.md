@@ -1,4 +1,4 @@
-# Budget Tracker
+# Sen Tracker
 
 A free, installable budget app (in RM). Sign in with Google, log your spending,
 and see monthly totals by category. Entries are stored in a Google Sheet and
@@ -14,11 +14,13 @@ receipts in Google Drive, with an Apps Script backend. Running cost: RM0.
 | `Code.gs` | The backend. Paste it into Apps Script (it isn't served by GitHub Pages) |
 | `index.html` | The page: sign-in, then the Add, History, Summary and Settings screens |
 | `style.css` | The look |
-| `app.js` | The logic: sign-in, talking to the script, saving entries, drawing the screens |
+| `app.js` | The logic: sign-in, talking to the script, saving entries, drawing every screen |
+| `statement.js` | Makes the monthly PDF statement by hand, with no library (tagged for screen readers) |
 | `config.js` | Your Client ID and Script URL. The only file you edit |
 | `manifest.json` | Tells phones the app's name, icon and colours, so it can be installed |
 | `sw.js` | The service worker: keeps a copy of the app's files so it opens offline |
 | `privacy.html` | The privacy policy (Google requires it before publishing sign-in) |
+| `fonts/` | The Geist font (SIL Open Font License, see `fonts/OFL.txt`) |
 | `icons/` | App icons: 192px, 512px, a "maskable" 512px for Android, and 180px for iPhone |
 
 ## Run it locally

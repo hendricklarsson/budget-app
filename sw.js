@@ -11,7 +11,7 @@
 // version to bump); when offline you get the last copy that worked.
 
 // Change this name only if you want to throw away every old cached file.
-const CACHE_NAME = 'budget-app-v1';
+const CACHE_NAME = 'sen-tracker-v2';
 
 // The files that make up the app. Paths are relative to sw.js, so they work
 // both on localhost and under /budget-app/ on GitHub Pages.
@@ -20,12 +20,15 @@ const APP_FILES = [
   'index.html',
   'style.css',
   'app.js',
+  'statement.js',
   'config.js',
   'manifest.json',
   'privacy.html',
   'icons/icon-192.png',
   'icons/icon-512.png',
   'icons/apple-touch-icon.png',
+  'fonts/Geist-latin.woff2',
+  'fonts/Geist-latin-ext.woff2',
 ];
 
 /**
