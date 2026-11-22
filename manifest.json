@@ -1,6 +1,6 @@
 {
   "name": "Sen Tracker",
-  "short_name": "Sen",
+  "short_name": "Sen Tracker",
   "description": "Know where every ringgit goes, in plain words.",
   "start_url": "./",
   "scope": "./",
