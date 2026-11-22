@@ -15,7 +15,7 @@
 //
 // Used by app.js:
 //   const resources = await SenStatement.load();     // fonts + logo, once
-//   SenStatement.build({month, monthLabel, email, entries, generatedAt}, resources)
+//   SenStatement.build({month, monthLabel, name, email, entries, previousEntries, generatedAt}, resources)
 //     → {bytes, pages, fileName}
 
 'use strict';
@@ -30,6 +30,17 @@ const SenStatement = (() => {
   const INK = [0.043, 0.051, 0.071];   // #0b0d12
   const MUTED = [0.337, 0.357, 0.4];   // #565b66
   const RULE = [0.86, 0.87, 0.89];
+  const GREEN = [0.122, 0.42, 0.208];        // less than last month
+  const GREEN_FILL = [0.89, 0.957, 0.906];
+  const GREEN_BORDER = [0.73, 0.86, 0.76];
+  const RED = [0.706, 0.137, 0.094];         // more than last month
+  const RED_FILL = [1, 0.925, 0.918];
+  const RED_BORDER = [0.95, 0.72, 0.7];
+  const ORANGE = [0.851, 0.329, 0.118];      // the biggest day
+  const SLATE = [0.32, 0.38, 0.52];          // other days
+  const WARN_FILL = [1, 0.957, 0.839];       // the "In Progress" notice
+  const WARN_BORDER = [0.91, 0.788, 0.478];
+  const WARN_INK = [0.361, 0.239, 0];
   const CATEGORY_COLORS = {            // the app's category colours
     Food: [0.851, 0.329, 0.118], Transport: [0.169, 0.541, 0.275], Bills: [0.384, 0.278, 0.847],
     Shopping: [0.812, 0.216, 0.518], Health: [0.043, 0.525, 0.596], Entertainment: [0.612, 0.435, 0],
@@ -286,13 +297,15 @@ const SenStatement = (() => {
   /**
    * Draws text with its baseline at `y` (measured from the top of the page)
    * and marks it as content of the tag `owner`, or as decoration if owner is
-   * null. Font 'R' is Geist Medium, 'B' is Geist SemiBold. align 'right'
-   * makes x the right edge.
+   * null. Inside a chart (doc.inFigure) it is drawn plain: the chart is one
+   * tagged figure with a text description. Font 'R' is Geist Medium, 'B' is
+   * Geist SemiBold. align 'right' makes x the right edge; 'center' centres it.
    */
   function text(doc, owner, x, y, str, { font = 'R', size = 11, fill = INK, align = 'left' } = {}) {
     const page = doc.page;
     const face = doc.fonts[font];
-    const drawX = align === 'right' ? x - width(face, str, size) : x;
+    const w = width(face, str, size);
+    const drawX = align === 'right' ? x - w : align === 'center' ? x - w / 2 : x;
     const codes = glyphs(face, str).map(({ g, ch }) => {
       if (!face.used.has(g)) face.used.set(g, ch);
       return g.toString(16).padStart(4, '0');
@@ -305,14 +318,37 @@ const SenStatement = (() => {
       owner.kids.push({ page, mcid });
       page.ops.push('/' + owner.type + ' <</MCID ' + mcid + '>> BDC ' + draw + ' EMC');
     } else {
-      page.ops.push('/Artifact BMC ' + draw + ' EMC');
+      paint(doc, draw);
     }
+  }
+
+  /**
+   * Adds drawing instructions that are decoration: marked "Artifact" so
+   * screen readers skip them, or drawn plain inside a chart (doc.inFigure).
+   */
+  function paint(doc, ops) {
+    doc.page.ops.push(doc.inFigure ? ops : '/Artifact BMC ' + ops + ' EMC');
+  }
+
+  /**
+   * Splits text into lines no wider than maxWidth, breaking between words.
+   * Used for the "In Progress" notice and chart captions.
+   */
+  function wrap(doc, str, font, size, maxWidth) {
+    const lines = [];
+    let line = '';
+    for (const word of String(str).split(' ')) {
+      const next = line ? line + ' ' + word : word;
+      if (line && width(doc.fonts[font], next, size) > maxWidth) { lines.push(line); line = word; } else line = next;
+    }
+    if (line) lines.push(line);
+    return lines;
   }
 
   /** A thin horizontal line (decoration). */
   function rule(doc, y, x1 = LEFT, x2 = RIGHT, weight = 0.6, stroke = RULE) {
-    doc.page.ops.push('/Artifact BMC q ' + color(stroke) + ' RG ' + f(weight) + ' w ' +
-      f(x1) + ' ' + f(PAGE_H - y) + ' m ' + f(x2) + ' ' + f(PAGE_H - y) + ' l S Q EMC');
+    paint(doc, 'q ' + color(stroke) + ' RG ' + f(weight) + ' w ' +
+      f(x1) + ' ' + f(PAGE_H - y) + ' m ' + f(x2) + ' ' + f(PAGE_H - y) + ' l S Q');
   }
 
   /** The path of a rounded rectangle (top-left at x, top). */
@@ -331,173 +367,370 @@ const SenStatement = (() => {
     ].join(' ');
   }
 
-  /** A rounded rectangle outline (decoration). */
-  function box(doc, x, top, w, h, r) {
-    doc.page.ops.push('/Artifact BMC q ' + color(RULE) + ' RG 0.8 w ' + roundedPath(x, top, w, h, r) + ' S Q EMC');
+  /** A rounded rectangle: an outline, a fill, or both (decoration). */
+  function box(doc, x, top, w, h, r, { stroke = RULE, fill = null } = {}) {
+    const mode = fill && stroke ? 'B' : fill ? 'f' : 'S';
+    paint(doc, 'q ' + (fill ? color(fill) + ' rg ' : '') + (stroke ? color(stroke) + ' RG 0.8 w ' : '') +
+      roundedPath(x, top, w, h, r) + ' ' + mode + ' Q');
   }
 
   /** A category colour dot centred at (x, y) (decoration: the name is beside it). */
   function dot(doc, x, y, category) {
     const r = 3.2;
-    doc.page.ops.push('/Artifact BMC q ' + color(CATEGORY_COLORS[category] || MUTED) + ' rg ' +
-      roundedPath(x - r, y - r, r * 2, r * 2, r) + ' f Q EMC');
+    paint(doc, 'q ' + color(CATEGORY_COLORS[category] || MUTED) + ' rg ' + roundedPath(x - r, y - r, r * 2, r * 2, r) + ' f Q');
+  }
+
+  /**
+   * Draws a chart as ONE tagged figure: drawFn's lines and words are drawn
+   * plain, and `alt` is the text a screen reader reads instead.
+   */
+  function figure(doc, alt, drawFn) {
+    const el = tag('Figure', doc.root, { Alt: alt });
+    const page = doc.page;
+    const mcid = page.mcids.length;
+    page.mcids.push(el);
+    el.kids.push({ page, mcid });
+    page.ops.push('/Figure <</MCID ' + mcid + '>> BDC');
+    doc.inFigure = true;
+    drawFn();
+    doc.inFigure = false;
+    page.ops.push('EMC');
   }
 
   /** The "sen" logo and app name, top left of every page (decoration). */
   function brand(doc) {
     if (doc.logo) {
-      doc.page.ops.push('/Artifact BMC q ' + roundedPath(LEFT, 42, 30, 30, 8.4) + ' W n 30 0 0 30 ' + f(LEFT) + ' ' +
-        f(PAGE_H - 72) + ' cm /Logo Do Q EMC');
+      paint(doc, 'q ' + roundedPath(LEFT, 42, 30, 30, 8.4) + ' W n 30 0 0 30 ' + f(LEFT) + ' ' + f(PAGE_H - 72) + ' cm /Logo Do Q');
     }
     text(doc, null, LEFT + 40, 62, 'Sen Tracker', { font: 'B', size: 15 });
   }
 
+  /** The title block on the right of every page; tagged on page 1 only. */
+  function titleBlock(doc, subtitle, tagged) {
+    text(doc, tagged ? tag('H1', doc.root) : null, RIGHT, 62, 'Monthly Statement', { font: 'B', size: 20, align: 'right' });
+    text(doc, tagged ? tag('P', doc.root) : null, RIGHT, 80, subtitle, { size: 11.5, fill: MUTED, align: 'right' });
+  }
+
   /** The column positions of the "All Entries" table. */
-  const COLS = { date: LEFT, dot: LEFT + 70, category: LEFT + 78, note: LEFT + 174, amount: RIGHT };
+  const COLS = { date: LEFT, dot: LEFT + 62, category: LEFT + 70, note: LEFT + 174, amount: RIGHT };
   const NOTE_WIDTH = RIGHT - 84 - COLS.note;
-  const ROW = 25; // row height
+  const ROW = 22; // row height
 
   /** Draws the header row of "All Entries"; tagged once, decoration when repeated. */
   function entryHeader(doc, table, repeated) {
     const y = doc.page.y;
     const owner = repeated ? null : tag('TR', table);
     const th = (label, x, align) => text(doc, owner ? tag('TH', owner, { Scope: 'Column' }) : null, x, y, label,
-      { font: 'B', size: 11, align });
+      { font: 'B', size: 10.5, align });
     th('Date', COLS.date);
     th('Category', COLS.category - 8);
     th('Note', COLS.note);
     th('Amount', COLS.amount, 'right');
-    rule(doc, y + 9, LEFT, RIGHT, 0.9, INK);
-    doc.page.y = y + 9 + 17;
+    rule(doc, y + 8, LEFT, RIGHT, 0.9, INK);
+    doc.page.y = y + 8 + 17;
   }
 
-  /** Lays out the whole statement. Returns the document (pages + tags). */
+  /** "↓ RM 96.20" (less, green) / "↑ RM 7.60" (more, red) / "No change". */
+  function change(diff) {
+    if (diff === 0) return { words: 'No change', fill: MUTED };
+    return { words: (diff < 0 ? '↓ ' : '↑ ') + rm(Math.abs(diff)), fill: diff < 0 ? GREEN : RED };
+  }
+
+  /**
+   * A pie slice from angle a0 to a1 (radians, clockwise from 12 o'clock),
+   * built from bezier curves of at most a quarter turn each.
+   */
+  function slicePath(cx, cy, r, a0, a1) {
+    const pt = (a) => [cx + r * Math.sin(a), cy - r * Math.cos(a)]; // top-based y
+    const parts = [f(cx) + ' ' + f(PAGE_H - cy) + ' m'];
+    const [sx, sy] = pt(a0);
+    parts.push(f(sx) + ' ' + f(PAGE_H - sy) + ' l');
+    const steps = Math.ceil((a1 - a0) / (Math.PI / 2));
+    for (let i = 0; i < steps; i++) {
+      const t0 = a0 + ((a1 - a0) * i) / steps;
+      const t1 = a0 + ((a1 - a0) * (i + 1)) / steps;
+      const k = (4 / 3) * Math.tan((t1 - t0) / 4) * r;
+      const [x0, y0] = pt(t0);
+      const [x3, y3] = pt(t1);
+      const c1 = [x0 + k * Math.cos(t0), y0 + k * Math.sin(t0)];
+      const c2 = [x3 - k * Math.cos(t1), y3 - k * Math.sin(t1)];
+      parts.push([c1[0], PAGE_H - c1[1], c2[0], PAGE_H - c2[1], x3, PAGE_H - y3].map(f).join(' ') + ' c');
+    }
+    return parts.join(' ') + ' h';
+  }
+
+  /**
+   * Lays out the whole statement. Returns the document (pages + tags).
+   * Page 1: header (and the amber "In Progress" notice while the month is
+   * still going), details, four summary boxes, three charts, and spending
+   * by category compared with last month. Then every entry, oldest first,
+   * and the totals.
+   */
   function layout(options, resources) {
-    const { month, monthLabel, email, entries, generatedAt: now } = options;
-    const doc = { pages: [], root: tag('Document', null), fonts: resources.fonts, logo: resources.logo };
+    const { month, monthLabel, email, name, entries, previousEntries = [], generatedAt: now } = options;
+    const doc = { pages: [], root: tag('Document', null), fonts: resources.fonts, logo: resources.logo, inFigure: false };
     for (const face of Object.values(doc.fonts)) face.used = new Map();
     addPage(doc);
     const root = doc.root;
     const [year, monthNumber] = month.split('-').map(Number);
     const monthName = MONTHS[monthNumber - 1];
+    const mon = monthName.slice(0, 3);
+    const prevName = MONTHS[(monthNumber + 10) % 12];
     const lastDay = new Date(year, monthNumber, 0).getDate();
-    const isCurrent = now.getFullYear() === year && now.getMonth() + 1 === monthNumber;
-    const daysSoFar = isCurrent ? now.getDate() : lastDay;
+    const inProgress = now.getFullYear() === year && now.getMonth() + 1 === monthNumber;
+    const daysSoFar = inProgress ? now.getDate() : lastDay;
     const total = sum(entries);
-    const spendingDays = new Set(entries.map((e) => e.date)).size;
+    const prevTotal = sum(previousEntries);
+    const byDay = {};
+    for (const e of entries) byDay[e.date] = (byDay[e.date] || 0) + Math.round(e.amount * 100) / 100;
+    const spendingDays = Object.keys(byDay).length;
+    const generated = now.getDate() + ' ' + MONTHS[now.getMonth()].slice(0, 3) + ' ' + now.getFullYear() + ', ' + now.getHours() + ':' + pad2(now.getMinutes());
+    const asOf = daysSoFar + ' ' + mon;
+    const subtitle = inProgress ? monthLabel + ' · as of ' + asOf : monthLabel;
 
-    // --- Header: brand on the left, title on the right ---
+    // --- Header ---
     brand(doc);
-    text(doc, tag('H1', root), RIGHT, 64, 'Monthly Statement', { font: 'B', size: 21, align: 'right' });
-    text(doc, tag('P', root), RIGHT, 84, monthLabel, { size: 12.5, fill: MUTED, align: 'right' });
-    rule(doc, 100);
+    titleBlock(doc, subtitle, true);
+    let y = 100;
 
-    // --- Details: label above value, read as one paragraph each ---
-    const details = [
-      ['Prepared For', email], ['Period', '1 to ' + lastDay + ' ' + monthName.slice(0, 3) + ' ' + year],
-      ['Generated', now.getDate() + ' ' + MONTHS[now.getMonth()].slice(0, 3) + ' ' + now.getFullYear() + ', ' + now.getHours() + ':' + pad2(now.getMinutes())],
-      ['Currency', 'Malaysian Ringgit (RM)'],
-    ];
-    details.forEach(([label, value], i) => {
-      const x = i % 2 === 0 ? LEFT : LEFT + 268;
-      const y = 122 + Math.floor(i / 2) * 40;
+    // --- "In Progress" notice (only while the month is still going) ---
+    if (inProgress) {
       const p = tag('P', root);
-      text(doc, p, x, y, label, { size: 11, fill: MUTED });
-      text(doc, p, x, y + 16, fit(doc.fonts.B, value, 11.5, 250), { font: 'B', size: 11.5 });
-    });
-    rule(doc, 194);
-
-    // --- Three summary boxes ---
-    const boxW = (RIGHT - LEFT - 20) / 3;
-    [['Total Spent', rm(total)], ['Entries', String(entries.length)], ['Daily Average', rm(total / spendingDays)]]
-      .forEach(([label, value], i) => {
-        const x = LEFT + i * (boxW + 10);
-        box(doc, x, 208, boxW, 60, 12);
-        const p = tag('P', root);
-        text(doc, p, x + 14, 228, label, { size: 10, fill: MUTED });
-        text(doc, p, x + 14, 254, value, { font: 'B', size: 18 });
-      });
-
-    // --- By Category ---
-    text(doc, tag('H2', root), LEFT, 302, 'By Category', { font: 'B', size: 13 });
-    const catTable = tag('Table', root);
-    const catCols = [[LEFT, 'Category', 'left'], [LEFT + 350, 'Entries', 'right'], [LEFT + 446, 'Amount', 'right'], [RIGHT, 'Share', 'right']];
-    let y = 328;
-    const headRow = tag('TR', catTable);
-    catCols.forEach(([x, label, align]) => text(doc, tag('TH', headRow, { Scope: 'Column' }), x, y, label, { font: 'B', size: 11, align }));
-    rule(doc, y + 9, LEFT, RIGHT, 0.9, INK);
-    y += 9 + 17;
-    const categories = CATEGORIES.map((name) => {
-      const list = entries.filter((e) => e.category === name);
-      return { name, n: list.length, amount: sum(list) };
-    }).filter((c) => c.n > 0).sort((a, b) => b.amount - a.amount);
-    for (const c of categories) {
-      const row = tag('TR', catTable);
-      dot(doc, LEFT + 4, y - 3.8, c.name);
-      text(doc, tag('TD', row), LEFT + 14, y, c.name, { size: 11 });
-      text(doc, tag('TD', row), catCols[1][0], y, String(c.n), { size: 11, align: 'right' });
-      text(doc, tag('TD', row), catCols[2][0], y, rm(c.amount), { size: 11, align: 'right' });
-      text(doc, tag('TD', row), RIGHT, y, Math.round((c.amount / total) * 100) + '%', { size: 11, align: 'right' });
-      rule(doc, y + 10);
-      y += ROW;
+      const lines = wrap(doc, monthName + ' is not over yet. This statement covers 1 to ' + daysSoFar + ' ' + monthName +
+        ', as of ' + generated + '. Later spending is not included.', 'R', 10, RIGHT - LEFT - 120);
+      const h = 18 + lines.length * 13;
+      box(doc, LEFT, y, RIGHT - LEFT, h, 8, { stroke: WARN_BORDER, fill: WARN_FILL });
+      box(doc, LEFT + 10, y + h / 2 - 9, 86, 18, 4, { stroke: null, fill: WARN_INK });
+      text(doc, p, LEFT + 53, y + h / 2 + 3.4, 'IN PROGRESS', { font: 'B', size: 8.5, fill: [1, 1, 1], align: 'center' });
+      lines.forEach((line, i) => text(doc, p, LEFT + 108, y + 15 + i * 13, line, { size: 10, fill: WARN_INK }));
+      y += h + 14;
     }
 
-    // --- All Entries (newest first; continues onto more pages as needed) ---
-    y += 14;
-    text(doc, tag('H2', root), LEFT, y, 'All Entries', { font: 'B', size: 13 });
-    doc.page.y = y + 26;
+    // --- Details: label above value, read as one paragraph each ---
+    rule(doc, y);
+    y += 20;
+    const details = [
+      ['Prepared For', name || email, name ? email : ''],
+      ['Period', '1 to ' + daysSoFar + ' ' + mon + ' ' + year + (inProgress ? ' (so far)' : ''), ''],
+      ['Generated', generated, ''],
+    ];
+    details.forEach(([label, value, extra], i) => {
+      const x = LEFT + [0, 200, 360][i];
+      const p = tag('P', root);
+      text(doc, p, x, y, label, { size: 10, fill: MUTED });
+      text(doc, p, x, y + 15, fit(doc.fonts.B, value, 11, 190), { font: 'B', size: 11 });
+      if (extra) text(doc, p, x, y + 29, fit(doc.fonts.R, extra, 9.5, 190), { size: 9.5, fill: MUTED });
+    });
+    y += name ? 40 : 28;
+    rule(doc, y);
+    y += 12;
+
+    // --- Four summary boxes ---
+    const boxW = (RIGHT - LEFT - 24) / 4;
+    const vs = prevTotal > 0 ? change(Math.round((total - prevTotal) * 100) / 100) : null;
+    [[inProgress ? 'Total So Far' : 'Total Spent', rm(total), INK],
+     ['Entries', String(entries.length), INK],
+     ['Daily Average', rm(spendingDays ? total / spendingDays : 0), INK],
+     ['vs ' + prevName, vs ? vs.words : 'No data', vs ? vs.fill : MUTED]].forEach(([label, value, fill], i) => {
+      const x = LEFT + i * (boxW + 8);
+      const tint = i === 3 && vs && vs.fill !== MUTED ? (vs.fill === GREEN ? [GREEN_FILL, GREEN_BORDER] : [RED_FILL, RED_BORDER]) : [null, RULE];
+      box(doc, x, y, boxW, 50, 10, { stroke: tint[1], fill: tint[0] });
+      const p = tag('P', root);
+      text(doc, p, x + 11, y + 18, label, { size: 9.5, fill: i === 3 && vs ? fill : MUTED });
+      text(doc, p, x + 11, y + 38, fit(doc.fonts.B, value, 14, boxW - 18), { font: 'B', size: 14, fill });
+    });
+    y += 64;
+
+    // --- Charts: Where It Went (pie), Spending by Day (bars), Compared With (bars) ---
+    const chartTop = y;
+    const leftW = 236;
+    const rightX = LEFT + leftW + 12;
+    const rightW = RIGHT - rightX;
+    const cats = CATEGORIES.map((c) => ({ name: c, amount: sum(entries.filter((e) => e.category === c)), n: entries.filter((e) => e.category === c).length }))
+      .filter((c) => c.n > 0).sort((a, b) => b.amount - a.amount);
+    const share = (amount) => Math.round((amount / total) * 100);
+
+    box(doc, LEFT, chartTop, leftW, 196, 10);
+    text(doc, tag('H2', root), LEFT + 12, chartTop + 20, 'Where It Went', { font: 'B', size: 11.5 });
+    figure(doc, 'Pie chart of spending by category: ' + cats.map((c) => c.name + ' ' + share(c.amount) + '%').join(', ') + '.', () => {
+      const cx = LEFT + leftW / 2;
+      const cy = chartTop + 118;
+      const r = 44;
+      let a = 0;
+      const small = [];
+      const labels = { left: [], right: [] };
+      for (const c of cats) {
+        const sweep = (c.amount / total) * Math.PI * 2;
+        const a1 = a + sweep;
+        paint(doc, 'q ' + color(CATEGORY_COLORS[c.name]) + ' rg ' + (sweep >= Math.PI * 2 - 1e-6
+          ? roundedPath(cx - r, cy - r, r * 2, r * 2, r) : slicePath(cx, cy, r, a, a1)) + ' f Q');
+        if (share(c.amount) < 5) small.push(c.name + ' ' + share(c.amount) + '%');
+        else {
+          const mid = a + sweep / 2;
+          const side = Math.sin(mid) >= 0 ? 'right' : 'left';
+          labels[side].push({ c, y: cy - (r + 8) * Math.cos(mid) });
+        }
+        a = a1;
+      }
+      // Labels sit beside the pie, right of it or left of it, and are pushed
+      // apart so neighbouring small slices never print on top of each other.
+      for (const side of ['left', 'right']) {
+        const list = labels[side].sort((p, q) => p.y - q.y);
+        for (let i = 1; i < list.length; i++) list[i].y = Math.max(list[i].y, list[i - 1].y + 22);
+        const overflow = list.length ? list[list.length - 1].y - (chartTop + 186) : 0;
+        if (overflow > 0) list.forEach((l) => { l.y -= overflow; });
+        for (const l of list) {
+          const x = side === 'right' ? cx + r + 10 : cx - r - 10;
+          const align = side === 'right' ? 'left' : 'right';
+          text(doc, null, x, l.y - 1, l.c.name, { size: 8.5, align });
+          text(doc, null, x, l.y + 9, share(l.c.amount) + '%', { font: 'B', size: 8.5, align });
+        }
+      }
+      // Slices under 5% are named together at the top, so labels don't collide.
+      if (small.length) text(doc, null, cx, chartTop + 40, fit(doc.fonts.R, small.join(', '), 8.5, leftW - 20), { size: 8.5, align: 'center' });
+    });
+
+    // Spending by Day
+    const dayBoxH = 104;
+    box(doc, rightX, chartTop, rightW, dayBoxH, 10);
+    text(doc, tag('H2', root), rightX + 12, chartTop + 20, 'Spending by Day', { font: 'B', size: 11.5 });
+    const days = Object.keys(byDay);
+    const biggest = days.length ? days.reduce((p, q) => (byDay[q] > byDay[p] ? q : p)) : null;
+    const dayLabel = (d) => ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(year, monthNumber - 1, Number(d.slice(8))).getDay()] + ' ' + Number(d.slice(8)) + ' ' + mon;
+    figure(doc, 'Bar chart of spending for each day, 1 to ' + daysSoFar + ' ' + mon + '.' +
+      (biggest ? ' Biggest day ' + dayLabel(biggest) + ', ' + rm(byDay[biggest]) + '.' : ''), () => {
+      const x0 = rightX + 12;
+      const plotW = rightW - 24;
+      const base = chartTop + 70;
+      const step = plotW / lastDay;
+      const max = Math.max(...Object.values(byDay), 1);
+      for (let d = 1; d <= lastDay; d++) {
+        const key = month + '-' + pad2(d);
+        const x = x0 + (d - 1) * step + step * 0.15;
+        if (d > daysSoFar) {
+          paint(doc, 'q ' + color(RULE) + ' rg ' + roundedPath(x, base - 1.5, step * 0.7, 1.5, 0.5) + ' f Q');
+          continue;
+        }
+        const v = byDay[key] || 0;
+        if (!v) continue;
+        const hgt = Math.max(2, (v / max) * 44);
+        paint(doc, 'q ' + color(key === biggest ? ORANGE : SLATE) + ' rg ' + roundedPath(x, base - hgt, step * 0.7, hgt, Math.min(1.2, step * 0.3)) + ' f Q');
+      }
+      rule(doc, base + 0.5, x0, x0 + plotW, 0.6, MUTED);
+      text(doc, null, x0, base + 11, '1 ' + mon, { size: 8, fill: MUTED });
+      if (inProgress && daysSoFar < lastDay - 3 && daysSoFar > 4) {
+        text(doc, null, x0 + (daysSoFar - 0.5) * step, base + 11, daysSoFar + ' ' + mon + ' · today', { font: 'B', size: 8, align: 'center' });
+      }
+      text(doc, null, x0 + plotW, base + 11, lastDay + ' ' + mon, { size: 8, fill: MUTED, align: 'right' });
+      if (biggest) text(doc, null, x0, base + 25, 'Biggest: ' + dayLabel(biggest) + ', ' + rm(byDay[biggest]), { font: 'B', size: 8.5, fill: ORANGE });
+    });
+
+    // Compared With last month
+    const cmpTop = chartTop + dayBoxH + 10;
+    box(doc, rightX, cmpTop, rightW, 196 - dayBoxH - 10, 10);
+    text(doc, tag('H2', root), rightX + 12, cmpTop + 20, 'Compared With ' + prevName, { font: 'B', size: 11.5 });
+    figure(doc, prevTotal > 0
+      ? monthName + (inProgress ? ' so far ' : ' ') + rm(total) + ', ' + prevName + ' ' + rm(prevTotal) + '.'
+      : 'No entries in ' + prevName + ' to compare.', () => {
+      if (!(prevTotal > 0)) {
+        text(doc, null, rightX + 12, cmpTop + 44, 'No entries in ' + prevName + ' to compare.', { size: 9.5, fill: MUTED });
+        return;
+      }
+      const barX = rightX + 38;
+      const barW = rightW - 38 - 80;
+      const max = Math.max(total, prevTotal);
+      const rowsY = [cmpTop + 36, cmpTop + 52];
+      [[mon, total, vs && vs.fill === RED ? RED : GREEN], [prevName.slice(0, 3), prevTotal, [0.72, 0.74, 0.78]]].forEach(([label, v, c], i) => {
+        text(doc, null, rightX + 12, rowsY[i] + 3, label, { size: 9, fill: MUTED });
+        paint(doc, 'q ' + color(c) + ' rg ' + roundedPath(barX, rowsY[i] - 5, Math.max(2, (v / max) * barW), 9, 1.5) + ' f Q');
+        text(doc, null, RIGHT - 12, rowsY[i] + 3, rm(v), { font: i === 0 ? 'B' : 'R', size: 9, fill: i === 0 ? c : INK, align: 'right' });
+      });
+      text(doc, null, rightX + 12, cmpTop + 70, monthName + (inProgress ? ' so far' : '') + ' vs all of ' + prevName + '.', { size: 8.5, fill: MUTED });
+    });
+    y = chartTop + 196 + 26;
+
+    // --- By Category, with the change from last month ---
+    text(doc, tag('H2', root), LEFT, y, 'By Category', { font: 'B', size: 12.5 });
+    const catTable = tag('Table', root);
+    const cols = [[LEFT, 'Category', 'left'], [LEFT + 288, 'Entries', 'right'], [LEFT + 378, 'Amount', 'right'], [LEFT + 432, 'Share', 'right'], [RIGHT, 'vs ' + prevName.slice(0, 3), 'right']];
+    y += 24;
+    const headRow = tag('TR', catTable);
+    cols.forEach(([x, label, align]) => text(doc, tag('TH', headRow, { Scope: 'Column' }), x, y, label, { font: 'B', size: 10.5, align }));
+    rule(doc, y + 8, LEFT, RIGHT, 0.9, INK);
+    y += 25;
+    for (const c of cats) {
+      const row = tag('TR', catTable);
+      const before = sum(previousEntries.filter((e) => e.category === c.name));
+      const ch = prevTotal > 0 ? change(Math.round((c.amount - before) * 100) / 100) : { words: '—', fill: MUTED };
+      const chWords = ch.words.replace('RM ', '');
+      dot(doc, LEFT + 4, y - 3.6, c.name);
+      text(doc, tag('TD', row), LEFT + 14, y, c.name, { size: 10.5 });
+      text(doc, tag('TD', row), cols[1][0], y, String(c.n), { size: 10.5, align: 'right' });
+      text(doc, tag('TD', row), cols[2][0], y, rm(c.amount), { size: 10.5, align: 'right' });
+      text(doc, tag('TD', row), cols[3][0], y, share(c.amount) + '%', { size: 10.5, align: 'right' });
+      text(doc, tag('TD', row), RIGHT, y, chWords, { font: 'B', size: 10.5, fill: ch.fill, align: 'right' });
+      rule(doc, y + 9);
+      y += 23;
+    }
+
+    // --- All Entries: a new page, oldest first, like a diary of the month ---
+    addPage(doc);
+    brand(doc);
+    titleBlock(doc, subtitle, false);
+    text(doc, tag('H2', root), LEFT, 114, 'All Entries, 1 to ' + daysSoFar + ' ' + mon, { font: 'B', size: 12.5 });
+    doc.page.y = 138;
     const entryTable = tag('Table', root);
     entryHeader(doc, entryTable, false);
-
     for (const e of entries) {
       if (doc.page.y + 12 > BOTTOM_LIMIT) {
         // New page: repeat the header so each page makes sense on its own.
         // The repeats are decoration: the table is still one table.
         addPage(doc);
         brand(doc);
-        text(doc, null, RIGHT, 64, 'Monthly Statement', { font: 'B', size: 21, align: 'right' });
-        text(doc, null, RIGHT, 84, monthLabel + ' · Continued', { size: 12.5, fill: MUTED, align: 'right' });
-        text(doc, null, LEFT, 126, 'All Entries, Continued', { font: 'B', size: 13 });
-        doc.page.y = 152;
+        titleBlock(doc, subtitle, false);
+        text(doc, null, LEFT, 114, 'All Entries, Continued', { font: 'B', size: 12.5 });
+        doc.page.y = 138;
         entryHeader(doc, entryTable, true);
       }
       const rowY = doc.page.y;
       const row = tag('TR', entryTable);
-      text(doc, tag('TD', row), COLS.date, rowY, shortDate(e.date), { size: 11, fill: MUTED });
-      dot(doc, COLS.dot, rowY - 3.8, e.category);
-      text(doc, tag('TD', row), COLS.category, rowY, e.category, { size: 11 });
-      text(doc, tag('TD', row), COLS.note, rowY, fit(doc.fonts.R, e.note || '—', 11, NOTE_WIDTH), { size: 11, fill: e.note ? INK : MUTED });
-      text(doc, tag('TD', row), COLS.amount, rowY, rm(e.amount), { size: 11, align: 'right' });
-      rule(doc, rowY + 10);
+      text(doc, tag('TD', row), COLS.date, rowY, Number(e.date.slice(8)) + ' ' + mon, { size: 10.5, fill: MUTED });
+      dot(doc, COLS.dot, rowY - 3.6, e.category);
+      text(doc, tag('TD', row), COLS.category, rowY, e.category, { size: 10.5 });
+      text(doc, tag('TD', row), COLS.note, rowY, fit(doc.fonts.R, e.note || '—', 10.5, NOTE_WIDTH), { size: 10.5, fill: e.note ? INK : MUTED });
+      text(doc, tag('TD', row), COLS.amount, rowY, rm(e.amount), { size: 10.5, align: 'right' });
+      rule(doc, rowY + 9);
       doc.page.y = rowY + ROW;
     }
 
     // --- Totals on the right, closing the statement ---
-    if (doc.page.y + 120 > BOTTOM_LIMIT) {
+    // The totals block is about 96 points tall and may run down to just
+    // above the footer line.
+    if (doc.page.y + 96 > PAGE_H - 66) {
       addPage(doc);
       brand(doc);
-      doc.page.y = 110;
+      titleBlock(doc, subtitle, false);
+      doc.page.y = 120;
     }
-    y = doc.page.y + 14;
+    y = doc.page.y + 10;
     const totalsX = LEFT + 252;
-    const totals = [['Entries', String(entries.length)], ['Days with Spending', spendingDays + ' of ' + daysSoFar]];
-    totals.forEach(([label, value], i) => {
+    [['Entries', String(entries.length)], ['Days with Spending', spendingDays + ' of ' + daysSoFar]].forEach(([label, value], i) => {
       const p = tag('P', root);
-      text(doc, p, totalsX, y + i * 27, label, { size: 11.5, fill: MUTED });
-      text(doc, p, RIGHT, y + i * 27, value, { size: 11.5, align: 'right' });
+      text(doc, p, totalsX, y + i * 21, label, { size: 10.5, fill: MUTED });
+      text(doc, p, RIGHT, y + i * 21, value, { size: 10.5, align: 'right' });
     });
-    rule(doc, y + 40, totalsX, RIGHT, 0.9, INK);
+    rule(doc, y + 31, totalsX, RIGHT, 0.9, INK);
     const final = tag('P', root);
-    text(doc, final, totalsX, y + 66, 'Total for ' + monthName, { font: 'B', size: 12 });
-    text(doc, final, RIGHT, y + 66, rm(total), { font: 'B', size: 12, align: 'right' });
-    text(doc, tag('P', root), LEFT, y + 112, 'This statement is for your own records. It is not a bank statement.', { size: 11, fill: MUTED });
+    text(doc, final, totalsX, y + 52, inProgress ? 'Total as of ' + asOf : 'Total for ' + monthName, { font: 'B', size: 11.5 });
+    text(doc, final, RIGHT, y + 52, rm(total), { font: 'B', size: 11.5, align: 'right' });
+    text(doc, tag('P', root), LEFT, y + 84, 'This statement is for your own records. It is not a bank statement.', { size: 10, fill: MUTED });
 
     // --- Footer on every page (decoration) ---
     doc.pages.forEach((page, i) => {
       doc.page = page;
       rule(doc, PAGE_H - 58);
-      text(doc, null, LEFT, PAGE_H - 38, 'Receipt photos and unsaved entries are not included.', { size: 10, fill: MUTED });
-      text(doc, null, RIGHT, PAGE_H - 38, 'Page ' + (i + 1) + ' of ' + doc.pages.length, { size: 10, fill: MUTED, align: 'right' });
+      text(doc, null, LEFT, PAGE_H - 38, 'Amounts in Malaysian Ringgit (RM). Receipt photos are not included.', { size: 9.5, fill: MUTED });
+      text(doc, null, RIGHT, PAGE_H - 38, 'Page ' + (i + 1) + ' of ' + doc.pages.length, { size: 9.5, fill: MUTED, align: 'right' });
     });
     return doc;
   }
@@ -603,7 +836,8 @@ const SenStatement = (() => {
     })(doc.root);
     for (const el of all) {
       const kids = el.kids.map((kid) => (kid.type ? ref(kid.obj) : '<< /Type /MCR /Pg ' + ref(kid.page.obj) + ' /MCID ' + kid.mcid + ' >>'));
-      const attrs = el.attributes && el.attributes.Scope ? ' /A << /O /Table /Scope /' + el.attributes.Scope + ' >>' : '';
+      const attrs = el.attributes && el.attributes.Scope ? ' /A << /O /Table /Scope /' + el.attributes.Scope + ' >>'
+        : el.attributes && el.attributes.Alt ? ' /Alt ' + literal(el.attributes.Alt) : '';
       set(el.obj, '<< /Type /StructElem /S /' + el.type + ' /P ' + ref(el.parent ? el.parent.obj : treeRoot) + attrs +
         ' /K [' + kids.join(' ') + '] >>');
     }
@@ -677,7 +911,8 @@ const SenStatement = (() => {
   }
 
   /**
-   * Builds the statement. entries: the month's saved entries, newest first.
+   * Builds the statement. entries: the month's saved entries, oldest first;
+   * previousEntries: last month's, for the comparisons.
    * resources: the result of load(). Returns the file's bytes, its page
    * count and a file name like "sen-tracker-nov-2026.pdf".
    */
