@@ -15,6 +15,20 @@
  *      whose email column matches the signed-in user.
  *   4. The answer is always JSON: {ok: true, ...} or {ok: false, code, error}.
  *
+ * ENCRYPTION (from v9)
+ *   Each entry's amount, category, date, time and note are encrypted on the
+ *   user's phone before they are sent, and so are receipt photos. This script
+ *   only ever sees scrambled text in the "data" column and scrambled bytes in
+ *   Drive, so neither the server nor the Sheet's owner can read them.
+ *   What stays readable: the email (to know whose rows they are), the entry
+ *   id, when it was created, and photo sizes.
+ *   The "Keys" tab holds one "key box" per user: the key that scrambles their
+ *   entries, itself locked twice, once with their passphrase and once with
+ *   their recovery code. Without one of those, the box can't be opened.
+ *   Rows saved before v9 keep their readable columns ("legacy" rows) until the
+ *   app encrypts them (action "migrate") right after the user sets up a
+ *   passphrase.
+ *
  * NAMING: functions ending in "_" are private. Apps Script hides them from the
  * editor's Run menu and they cannot be called from outside. Only setup(),
  * doGet() and doPost() are "public".
@@ -41,8 +55,10 @@ const FOLDER_NAME = 'Sen Tracker Receipts';
 // Column order in the sheet. Change it here and nowhere else.
 // 'time' (hh:mm, optional) was added later, at the end, so older sheets
 // keep working: ensureHeaders_() adds its header the first time it's needed.
+// 'data' (the encrypted entry) was added in v9; for encrypted rows the
+// readable columns date, amount, category, note and time stay empty.
 const HEADERS = ['id', 'email', 'date', 'amount', 'category', 'note',
-                 'receiptFileId', 'createdAt', 'deleted', 'time'];
+                 'receiptFileId', 'createdAt', 'deleted', 'time', 'data'];
 
 // COL.amount === 3, etc., so code reads row[COL.amount] instead of row[3].
 const COL = {};
@@ -50,13 +66,17 @@ HEADERS.forEach(function (name, index) { COL[name] = index; });
 
 // Number formats per column: '@' means plain text, so Sheets never turns
 // "2026-11-21" into a date or "007" into 7.
-const COLUMN_FORMATS = ['@', '@', '@', '0.00', '@', '@', '@', '@', 'General', '@'];
+const COLUMN_FORMATS = ['@', '@', '@', '0.00', '@', '@', '@', '@', 'General', '@', '@'];
 
-const CATEGORIES = ['Food', 'Transport', 'Bills', 'Shopping', 'Health',
-                    'Entertainment', 'Other'];
-const MAX_AMOUNT = 1000000;
-const MAX_NOTE_LENGTH = 200;
-const MAX_RECEIPT_BYTES = 2 * 1024 * 1024; // 2 MB; a 1280px JPEG is ~150 KB
+// The "Keys" tab: one row per user with their locked key box.
+const KEYS_SHEET_NAME = 'Keys';
+const KEY_HEADERS = ['email', 'box', 'updatedAt'];
+
+// The server can no longer check amounts, categories or notes (it can't read
+// them); the app checks them on the phone. It only checks sizes and shapes.
+const MAX_DATA_LENGTH = 4000;               // an encrypted entry is ~300 characters
+const MAX_BOX_LENGTH = 4000;                // a key box is ~500 characters
+const MAX_RECEIPT_BYTES = 2 * 1024 * 1024 + 64; // 2 MB photo + encryption overhead
 const LOCK_WAIT_MS = 10000;                 // wait up to 10 s for other saves
 
 // Daily limits, so no one (by mistake or on purpose) can fill your Drive or
@@ -96,6 +116,12 @@ function setup() {
   COLUMN_FORMATS.forEach(function (format, i) {
     sheet.getRange(1, i + 1, sheet.getMaxRows(), 1).setNumberFormat(format);
   });
+  // The Keys tab (made automatically later too, if missing).
+  let keys = ss.getSheetByName(KEYS_SHEET_NAME);
+  if (!keys) keys = ss.insertSheet(KEYS_SHEET_NAME);
+  keys.getRange(1, 1, 1, KEY_HEADERS.length).setValues([KEY_HEADERS]).setFontWeight('bold');
+  keys.setFrozenRows(1);
+  keys.getRange(1, 1, keys.getMaxRows(), KEY_HEADERS.length).setNumberFormat('@');
 
   // 2. The receipts folder. Reuse the one we made before if it still exists.
   let folder = null;
@@ -165,6 +191,9 @@ function handleAction_(request, email) {
     case 'list':         return listExpenses_(email);
     case 'add':          return addExpense_(request.expense, email);
     case 'update':       return updateExpense_(request.expense, email);
+    case 'migrate':      return migrateExpense_(request.expense, email);
+    case 'getKeys':      return { keys: readKeyBox_(email) };
+    case 'setKeys':      return setKeyBox_(request.box, Boolean(request.replace), email);
     case 'delete':       return deleteExpense_(request.id, email);
     case 'deleteMany':   return deleteManyExpenses_(request.ids, email);
     case 'getReceipt':   return getReceipt_(request.id, email);
@@ -186,6 +215,7 @@ function handleAction_(request, email) {
  *   LIMIT       — a daily limit was reached
  *   BAD_REQUEST — the input was wrong (message says what)
  *   NOT_FOUND   — no such entry for this user
+ *   CONFLICT    — the user already has a key box (set up on another phone)
  *   BUSY        — another save held the lock too long; try again
  *   SERVER      — the server is misconfigured or failed
  */
@@ -204,7 +234,9 @@ class ApiError extends Error {
  */
 function errorToJson_(err) {
   if (err instanceof ApiError) {
-    return { ok: false, code: err.code, error: err.message };
+    const reply = { ok: false, code: err.code, error: err.message };
+    if (err.keys) reply.keys = err.keys; // CONFLICT: the box that already exists
+    return reply;
   }
   console.error(err && err.stack ? err.stack : err);
   return { ok: false, code: 'SERVER', error: 'Something went wrong on the server. Please try again.' };
@@ -314,20 +346,16 @@ function sha256_(text) {
 // ---------------------------------------------------------------------------
 
 /**
- * action "list": returns all of the user's entries that are not deleted,
- * newest date first. Reading needs no lock: it never changes anything.
+ * action "list": returns all of the user's entries that are not deleted, plus
+ * their key box (or null before they've made a passphrase). The entries are
+ * encrypted, so the app sorts them after unlocking. Reading needs no lock.
  */
 function listExpenses_(email) {
   const rows = readAllRows_(getSheet_());
   const expenses = rows
     .filter(function (row) { return isOwner_(row, email) && !isDeleted_(row); })
     .map(rowToExpense_);
-  expenses.sort(function (a, b) {
-    if (a.date !== b.date) return a.date < b.date ? 1 : -1;
-    if (a.time !== b.time) return a.time < b.time ? 1 : -1;
-    return a.createdAt < b.createdAt ? 1 : -1;
-  });
-  return { expenses: expenses };
+  return { expenses: expenses, keys: readKeyBox_(email) };
 }
 
 /**
@@ -343,7 +371,7 @@ function listExpenses_(email) {
  * for the quick part: re-checking and writing the row.
  */
 function addExpense_(input, email) {
-  const expense = validateExpense_(input);
+  const expense = validateEncrypted_(input);
   const receiptBlob = input.receipt ? decodeReceipt_(input.receipt, expense.id) : null;
   const hasReceipt = Boolean(receiptBlob);
   const sheet = getSheet_();
@@ -402,14 +430,11 @@ function writeExpenseRow_(sheet, expense, email, receiptFileId) {
   const row = [];
   row[COL.id] = expense.id;
   row[COL.email] = email;
-  row[COL.date] = expense.date;
-  row[COL.amount] = expense.amount;
-  row[COL.category] = expense.category;
-  row[COL.note] = safeText_(expense.note);
+  clearReadableColumns_(row);
   row[COL.receiptFileId] = receiptFileId;
   row[COL.createdAt] = new Date().toISOString();
   row[COL.deleted] = false;
-  row[COL.time] = expense.time;
+  row[COL.data] = expense.data;
 
   const range = sheet.getRange(sheet.getLastRow() + 1, 1, 1, HEADERS.length);
   range.setNumberFormats([COLUMN_FORMATS]); // set text format BEFORE writing
@@ -419,15 +444,15 @@ function writeExpenseRow_(sheet, expense, email, receiptFileId) {
 
 /**
  * action "update": changes an existing entry (Edit Expense in the app).
- * input = {id, date, amount, category, note, photo}, where photo is:
- *   missing          → keep the current photo,
- *   'remove'         → remove it,
- *   {mimeType, data} → replace it (or add one if there was none).
+ * input = {id, data, photo}, where data is the newly encrypted entry and photo:
+ *   missing  → keep the current photo,
+ *   'remove' → remove it,
+ *   {data}   → replace it with this encrypted photo (or add one).
  * Same order as add: a new photo is uploaded BEFORE taking the lock, and the
  * old photo is trashed AFTER releasing it, so other saves never wait on Drive.
  */
 function updateExpense_(input, email) {
-  const expense = validateExpense_(input);
+  const expense = validateEncrypted_(input);
   const photo = input.photo;
   const removePhoto = photo === 'remove';
   const newBlob = photo && !removePhoto ? decodeReceipt_(photo, expense.id) : null;
@@ -449,11 +474,8 @@ function updateExpense_(input, email) {
         if (String(rows[i][COL.id]) !== expense.id || !isOwner_(rows[i], email) || isDeleted_(rows[i])) continue;
         const row = rows[i].slice();          // keep id, email, createdAt as they are
         oldFileId = String(row[COL.receiptFileId] || '');
-        row[COL.date] = expense.date;
-        row[COL.time] = expense.time;
-        row[COL.amount] = expense.amount;
-        row[COL.category] = expense.category;
-        row[COL.note] = safeText_(expense.note);
+        clearReadableColumns_(row);
+        row[COL.data] = expense.data;
         if (newBlob) row[COL.receiptFileId] = newFileId;
         else if (removePhoto) row[COL.receiptFileId] = '';
         const range = sheet.getRange(i + 2, 1, 1, HEADERS.length);
@@ -471,6 +493,63 @@ function updateExpense_(input, email) {
     trashFile_(newFileId); // don't leave an unused new photo behind
     throw err;
   }
+}
+
+/**
+ * action "migrate": encrypts one entry saved before v9. The app reads the
+ * old row, encrypts it on the phone, and sends {id, data, receipt?}: the
+ * readable columns are cleared and replaced by data. If the entry had a
+ * photo, the app sends it encrypted too; the new file replaces the old one,
+ * which goes to the trash. Sending the same id again is harmless.
+ * Not counted towards the daily limits: it only rewrites existing entries.
+ */
+function migrateExpense_(input, email) {
+  const expense = validateEncrypted_(input);
+  const newBlob = input.receipt ? decodeReceipt_(input.receipt, expense.id) : null;
+  const sheet = getSheet_();
+
+  const current = findRowById_(readAllRows_(sheet), expense.id);
+  if (!current || !isOwner_(current, email) || isDeleted_(current)) {
+    throw new ApiError('NOT_FOUND', 'That entry was not found.');
+  }
+  if (current[COL.data]) return { expense: rowToExpense_(current), already: true };
+
+  const newFileId = newBlob ? getReceiptFolder_().createFile(newBlob).getId() : '';
+  try {
+    let oldFileId = '';
+    const saved = withLock_(function () {
+      const rows = readAllRows_(sheet);
+      for (let i = 0; i < rows.length; i++) {
+        if (String(rows[i][COL.id]) !== expense.id || !isOwner_(rows[i], email) || isDeleted_(rows[i])) continue;
+        const row = rows[i].slice();
+        if (row[COL.data]) return { row: row, already: true };
+        oldFileId = String(row[COL.receiptFileId] || '');
+        clearReadableColumns_(row);
+        row[COL.data] = expense.data;
+        if (newBlob) row[COL.receiptFileId] = newFileId;
+        const range = sheet.getRange(i + 2, 1, 1, HEADERS.length);
+        range.setNumberFormats([COLUMN_FORMATS]);
+        range.setValues([row]);
+        return { row: row };
+      }
+      throw new ApiError('NOT_FOUND', 'That entry was not found.');
+    });
+    if (saved.already) trashFile_(newFileId);          // done before: drop the copy
+    else if (newBlob && oldFileId) trashFile_(oldFileId); // the readable photo goes
+    return { expense: rowToExpense_(saved.row) };
+  } catch (err) {
+    trashFile_(newFileId);
+    throw err;
+  }
+}
+
+/** Empties the readable columns of a row (their values live in "data", encrypted). */
+function clearReadableColumns_(row) {
+  row[COL.date] = '';
+  row[COL.amount] = '';
+  row[COL.category] = '';
+  row[COL.note] = '';
+  row[COL.time] = '';
 }
 
 /**
@@ -536,7 +615,11 @@ function getReceipt_(id, email) {
   } catch (err) {
     throw new ApiError('NOT_FOUND', 'The receipt file is missing.');
   }
-  return { id: cleanId, mimeType: blob.getContentType(), data: Utilities.base64Encode(blob.getBytes()) };
+  // Photos saved from v9 on are encrypted ("application/octet-stream"); the
+  // app decrypts them. Older ones are plain JPEGs until they're migrated.
+  const mimeType = blob.getContentType();
+  return { id: cleanId, mimeType: mimeType, encrypted: mimeType !== 'image/jpeg',
+           data: Utilities.base64Encode(blob.getBytes()) };
 }
 
 /**
@@ -546,7 +629,95 @@ function getReceipt_(id, email) {
  */
 function deleteMyData_(email) {
   const removed = removeRows_(function (row) { return isOwner_(row, email); });
+  deleteKeyBox_(email);
   return { deletedRows: removed.rows, deletedReceipts: trashFiles_(removed.fileIds) };
+}
+
+// ---------------------------------------------------------------------------
+// Key boxes (the "Keys" tab)
+// ---------------------------------------------------------------------------
+
+/**
+ * The user's key box as text (JSON made by the app), or null if they haven't
+ * made a passphrase yet. The server can't open it: it is locked with the
+ * user's passphrase and recovery code, which never leave the phone.
+ */
+function readKeyBox_(email) {
+  const sheet = getKeysSheet_();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+  const rows = sheet.getRange(2, 1, lastRow - 1, KEY_HEADERS.length).getValues();
+  for (let i = 0; i < rows.length; i++) {
+    if (String(rows[i][0]).trim().toLowerCase() === email && rows[i][1]) return String(rows[i][1]);
+  }
+  return null;
+}
+
+/**
+ * action "setKeys": saves the user's key box.
+ *   replace = false: first setup. Refused with CONFLICT if a box already
+ *     exists (e.g. made on another phone a moment ago), and the existing box
+ *     is sent back so the app can ask for that passphrase instead.
+ *   replace = true: new passphrase or new recovery code. The box must hold
+ *     the same key (same keyId), so entries never become unreadable.
+ */
+function setKeyBox_(box, replace, email) {
+  const keyId = validateKeyBox_(box);
+  const sheet = getKeysSheet_();
+  return withLock_(function () {
+    const lastRow = sheet.getLastRow();
+    const rows = lastRow < 2 ? [] : sheet.getRange(2, 1, lastRow - 1, KEY_HEADERS.length).getValues();
+    for (let i = 0; i < rows.length; i++) {
+      if (String(rows[i][0]).trim().toLowerCase() !== email || !rows[i][1]) continue;
+      if (!replace) {
+        const error = new ApiError('CONFLICT', 'A passphrase was already made for this account. Type it to unlock.');
+        error.keys = String(rows[i][1]);
+        throw error;
+      }
+      let oldKeyId = '';
+      try { oldKeyId = JSON.parse(String(rows[i][1])).keyId; } catch (err) { /* damaged: allow replacing */ }
+      if (oldKeyId && oldKeyId !== keyId) {
+        throw new ApiError('BAD_REQUEST', 'This key box is for a different key.');
+      }
+      sheet.getRange(i + 2, 1, 1, KEY_HEADERS.length).setValues([[email, box, new Date().toISOString()]]);
+      return { keys: box };
+    }
+    if (replace) throw new ApiError('NOT_FOUND', 'There is no passphrase to change yet.');
+    const range = sheet.getRange(sheet.getLastRow() + 1, 1, 1, KEY_HEADERS.length);
+    range.setNumberFormat('@');
+    range.setValues([[email, box, new Date().toISOString()]]);
+    return { keys: box };
+  });
+}
+
+/** Removes the user's key box (Delete Account, Start Fresh). */
+function deleteKeyBox_(email) {
+  const sheet = getKeysSheet_();
+  withLock_(function () {
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return;
+    const rows = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (String(rows[i][0]).trim().toLowerCase() === email) sheet.deleteRow(i + 2);
+    }
+  });
+}
+
+/**
+ * Checks a key box's shape (the server can't check what's inside): JSON text
+ * of a sensible size with a version and a key id. Returns the key id.
+ */
+function validateKeyBox_(box) {
+  if (typeof box !== 'string' || box.length < 20 || box.length > MAX_BOX_LENGTH) {
+    throw new ApiError('BAD_REQUEST', 'Invalid key box.');
+  }
+  let parsed;
+  try { parsed = JSON.parse(box); } catch (err) { throw new ApiError('BAD_REQUEST', 'Invalid key box.'); }
+  if (!parsed || parsed.v !== 1 || typeof parsed.keyId !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(parsed.keyId) ||
+      !parsed.pass || !parsed.code) {
+    throw new ApiError('BAD_REQUEST', 'Invalid key box.');
+  }
+  return parsed.keyId;
 }
 
 /**
@@ -681,45 +852,20 @@ function userUsageKey_(email) {
 // ---------------------------------------------------------------------------
 
 /**
- * Checks every field of a new expense and returns a clean copy.
- * Never trust the browser: anyone can send any JSON to the /exec URL.
+ * Checks an encrypted entry {id, data} and returns a clean copy. The server
+ * can't read data, so it only checks that it is base64 text of a sensible
+ * size. Never trust the browser: anyone can send any JSON to the /exec URL.
  */
-function validateExpense_(input) {
+function validateEncrypted_(input) {
   if (!input || typeof input !== 'object') {
     throw new ApiError('BAD_REQUEST', 'Missing expense.');
   }
-
   const id = validateId_(input.id);
-
-  const amount = Math.round(Number(input.amount) * 100) / 100; // 2 decimals
-  if (typeof input.amount === 'boolean' || !isFinite(amount) || amount <= 0 || amount > MAX_AMOUNT) {
-    throw new ApiError('BAD_REQUEST', 'Amount must be a number above 0 and at most 1,000,000.');
+  const data = input.data;
+  if (typeof data !== 'string' || data.length < 24 || data.length > MAX_DATA_LENGTH || !/^[A-Za-z0-9+\/]+=*$/.test(data)) {
+    throw new ApiError('BAD_REQUEST', 'This entry was not encrypted correctly. Reload the app and try again.');
   }
-
-  if (CATEGORIES.indexOf(input.category) === -1) {
-    throw new ApiError('BAD_REQUEST', 'Category must be one of: ' + CATEGORIES.join(', ') + '.');
-  }
-
-  if (!isValidDate_(input.date)) {
-    throw new ApiError('BAD_REQUEST', 'Date must be a real date in the form yyyy-mm-dd.');
-  }
-
-  let note = input.note == null ? '' : input.note;
-  if (typeof note !== 'string') {
-    throw new ApiError('BAD_REQUEST', 'Note must be text.');
-  }
-  note = note.replace(/[\u0000-\u001F\u007F]/g, ' ').trim(); // no control characters
-  if (note.length > MAX_NOTE_LENGTH) {
-    throw new ApiError('BAD_REQUEST', 'Note must be ' + MAX_NOTE_LENGTH + ' characters or fewer.');
-  }
-
-  // Time of day is optional ('' for older entries): 24-hour "hh:mm".
-  const time = input.time == null ? '' : input.time;
-  if (time !== '' && (typeof time !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time))) {
-    throw new ApiError('BAD_REQUEST', 'Time must be in the form hh:mm.');
-  }
-
-  return { id: id, amount: amount, category: input.category, date: input.date, time: time, note: note };
+  return { id: id, data: data };
 }
 
 /** Ids are made by the app (a UUID). Allow only letters, digits, - and _. */
@@ -731,50 +877,26 @@ function validateId_(id) {
 }
 
 /**
- * True for a real calendar date in yyyy-mm-dd form. The regex checks the
- * shape; building a Date and reading it back rejects things like 2026-02-30.
- */
-function isValidDate_(value) {
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const parts = value.split('-').map(Number);
-  const d = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
-  return d.getUTCFullYear() === parts[0] && d.getUTCMonth() === parts[1] - 1 &&
-         d.getUTCDate() === parts[2] && parts[0] >= 2000 && parts[0] <= 2100;
-}
-
-/**
- * Checks a receipt sent as {mimeType: 'image/jpeg', data: base64} and turns it
- * into a file "blob". The app always compresses to JPEG, so anything else is
- * refused. The first two bytes of every JPEG are FF D8 (stored as -1, -40,
- * because Apps Script bytes are signed); this stops other files posing as one.
+ * Checks an encrypted receipt photo sent as {data: base64} and turns it into
+ * a file "blob". The photo was shrunk and encrypted on the phone, so it is
+ * stored as plain bytes ("application/octet-stream"), not as a picture: Drive
+ * can't show a preview of it, and neither can anyone opening the folder.
  */
 function decodeReceipt_(receipt, id) {
-  if (typeof receipt !== 'object' || receipt.mimeType !== 'image/jpeg' || typeof receipt.data !== 'string') {
-    throw new ApiError('BAD_REQUEST', 'Receipt must be a JPEG image.');
+  if (!receipt || typeof receipt !== 'object' || typeof receipt.data !== 'string') {
+    throw new ApiError('BAD_REQUEST', 'Invalid receipt photo.');
   }
-  const base64 = receipt.data.replace(/^data:image\/jpeg;base64,/, '');
-  if (base64.length > Math.ceil(MAX_RECEIPT_BYTES / 3) * 4) {
+  if (receipt.data.length > Math.ceil(MAX_RECEIPT_BYTES / 3) * 4) {
     throw new ApiError('BAD_REQUEST', 'Receipt image is too large (max 2 MB).');
   }
   let bytes;
   try {
-    bytes = Utilities.base64Decode(base64);
+    bytes = Utilities.base64Decode(receipt.data);
   } catch (err) {
     throw new ApiError('BAD_REQUEST', 'Receipt image data is damaged.');
   }
-  if (bytes.length < 4 || bytes[0] !== -1 || bytes[1] !== -40) {
-    throw new ApiError('BAD_REQUEST', 'Receipt must be a JPEG image.');
-  }
-  return Utilities.newBlob(bytes, 'image/jpeg', id + '.jpg');
-}
-
-/**
- * Stops "formula injection": text starting with = + - or @ would be run as a
- * formula by Sheets (e.g. a note "=IMPORTXML(...)"). A leading apostrophe
- * tells Sheets "this is plain text"; it is hidden and not returned on read.
- */
-function safeText_(text) {
-  return /^[=+\-@]/.test(text) ? "'" + text : text;
+  if (bytes.length < 40) throw new ApiError('BAD_REQUEST', 'Receipt image data is damaged.');
+  return Utilities.newBlob(bytes, 'application/octet-stream', id + '.bin');
 }
 
 // ---------------------------------------------------------------------------
@@ -799,6 +921,23 @@ function getSheet_() {
 function ensureHeaders_(sheet) {
   if (sheet.getLastColumn() >= HEADERS.length) return;
   sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]).setFontWeight('bold');
+}
+
+/**
+ * Opens the Keys tab, making it if it's missing (so an older setup doesn't
+ * need setup() run again).
+ */
+function getKeysSheet_() {
+  const id = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
+  if (!id) throw new ApiError('SERVER', 'Server not set up: run setup() in the Apps Script editor.');
+  const ss = SpreadsheetApp.openById(id);
+  let sheet = ss.getSheetByName(KEYS_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(KEYS_SHEET_NAME);
+    sheet.getRange(1, 1, 1, KEY_HEADERS.length).setValues([KEY_HEADERS]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
 }
 
 /** Opens the private receipts folder using the ID saved by setup(). */
@@ -828,18 +967,27 @@ function isDeleted_(row) {
 /**
  * Turns a sheet row into the object the app receives. The owner's email and
  * the Drive file id are left out: the app only needs to know a receipt exists.
+ *   Encrypted rows: {id, data, hasReceipt, createdAt}.
+ *   Rows from before v9: the readable fields, marked legacy: true, so the app
+ *   can encrypt them (see migrateExpense_).
  */
 function rowToExpense_(row) {
-  return {
+  const base = {
     id: String(row[COL.id]),
-    date: toDateText_(row[COL.date]),
-    time: toTimeText_(row[COL.time]),
-    amount: Number(row[COL.amount]),
-    category: String(row[COL.category]),
-    note: String(row[COL.note] || ''),
     hasReceipt: Boolean(row[COL.receiptFileId]),
     createdAt: row[COL.createdAt] instanceof Date ? row[COL.createdAt].toISOString() : String(row[COL.createdAt]),
   };
+  if (row[COL.data]) {
+    base.data = String(row[COL.data]);
+    return base;
+  }
+  base.legacy = true;
+  base.date = toDateText_(row[COL.date]);
+  base.time = toTimeText_(row[COL.time]);
+  base.amount = Number(row[COL.amount]);
+  base.category = String(row[COL.category]);
+  base.note = String(row[COL.note] || '');
+  return base;
 }
 
 /**

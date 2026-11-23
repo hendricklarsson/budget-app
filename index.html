@@ -13,63 +13,48 @@
   <link rel="icon" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
   <meta name="apple-mobile-web-app-title" content="Sen Tracker">
-  <meta name="theme-color" content="#f4f5f8">
+  <meta name="theme-color" content="#07080b">
 
   <!-- "defer" runs the scripts in this order after the page is parsed:
-       Google's sign-in library, our settings, the PDF statement maker, the app. -->
+       Google's sign-in library, our settings, the encryption, the PDF
+       statement maker, the app, then the passphrase screens. The app starts
+       once they have all loaded. -->
   <script src="https://accounts.google.com/gsi/client" defer></script>
   <script src="config.js" defer></script>
+  <script src="crypto.js" defer></script>
   <script src="statement.js" defer></script>
   <script src="app.js" defer></script>
+  <script src="passphrase.js" defer></script>
 </head>
-<body data-mesh="sunrise">
+<body data-wash="signin">
 
-  <!-- The coloured mesh behind every screen. app.js sets body[data-mesh]. -->
+  <!-- The coloured wash behind every screen. app.js sets body[data-wash]. -->
   <div class="mesh" aria-hidden="true"></div>
 
   <!-- ================= Sign In ================= -->
   <main id="signin-screen" class="signin" hidden>
-    <div class="brand"><span class="mark" aria-hidden="true">sen</span>Sen Tracker</div>
+    <span class="mark" aria-hidden="true">sen</span>
+    <h1 class="title">Know Where Every <span class="sub">Ringgit Goes</span></h1>
+    <p class="lede">Add what you spend. See it by day, month and year.</p>
+    <div class="spacer"></div>
 
-    <h1 class="display">Know Where Every Ringgit <span class="sub">Goes, in Plain Words.</span></h1>
+    <div id="signin-message" class="notice" hidden></div>
+    <div id="google-button" class="google-button"></div>
+    <button id="demo-button" type="button" class="btn btn-secondary btn-block">Try the Demo, No Sign-In</button>
 
-    <div class="signin-intro">
-      <p class="label">For Everyday Spending</p>
-      <p>Add what you spend. See it by day, month and year.</p>
-    </div>
-
-    <!-- An illustration of the app, not real data, so screen readers skip it. -->
-    <div class="signin-preview" aria-hidden="true">
-      <div class="glass">
-        <div class="preview-label">Spent Today</div>
-        <div class="panel preview-panel">
-          <div class="preview-amount">RM 46.30</div>
-          <div class="preview-bar"><span></span></div>
-          <div class="caption">3 entries</div>
-        </div>
-      </div>
-      <div class="glass">
-        <div class="preview-label">Top This Month</div>
-        <div class="preview-bars">
-          <span style="height:100%;background:#0b0d12"></span>
-          <span style="height:80%;background:#8f877d"></span>
-          <span style="height:48%;background:#b5aa9b"></span>
-          <span style="height:36%;background:#d7c9b5"></span>
-        </div>
-        <div class="preview-label">Food, 32%</div>
-      </div>
-    </div>
-
-    <div class="signin-bottom">
-      <div id="signin-message" class="banner" hidden></div>
-      <div id="google-button" class="google-button"></div>
-      <button id="demo-button" type="button" class="btn btn-secondary btn-block">Try the Demo, No Sign-In</button>
-      <p class="signin-foot">
-        <span>We use Google only to sign you in.</span>
-        <a href="privacy.html">Privacy</a>
-      </p>
+    <!-- On a 94% solid plate, so its contrast never depends on the glow. -->
+    <div class="card privacy-plate">
+      <span class="line"><span data-icon="lock"></span>Your entries are encrypted on your phone.</span>
+      <span style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:0 12px">
+        <button id="signin-see" type="button" class="link-button big">What the Developer Can See</button>
+        <a class="link-button big" href="privacy.html">Privacy Policy</a>
+      </span>
     </div>
   </main>
+
+  <!-- ================= Passphrase, recovery code and recovery screens =================
+       Filled in by passphrase.js. No tab bar here: each step has one way on. -->
+  <main id="vault-screen" class="vault" hidden></main>
 
   <!-- ================= The app (after sign-in, or in demo mode) ================= -->
   <div id="app-screen" hidden>
@@ -86,96 +71,97 @@
 
       <!-- Add Expense and Edit Expense share this one form. The order follows
            how people remember a purchase: how much, when, what it was, then
-           the category. The tab bar is hidden here; the ways out are the
-           Record/Save button or Back. -->
+           the category. The tab bar is hidden here; the ways out are Save or
+           Back. -->
       <section id="screen-form" class="screen" aria-labelledby="form-title" hidden>
         <div class="form-top">
-          <button id="form-back" type="button" class="btn btn-secondary btn-small"><span data-icon="back"></span>Back</button>
+          <button id="form-back" type="button" class="btn btn-secondary btn-icon" aria-label="Back"><span data-icon="back"></span></button>
+          <span class="req-note"><span class="req" aria-hidden="true">*</span> Required</span>
         </div>
         <div id="form-demo-banner"></div>
-        <div class="screen-head">
-          <h1 id="form-title" class="title">Add Expense <span id="form-subtitle" class="sub"></span></h1>
-        </div>
-        <p class="required-note"><span class="req" aria-hidden="true">*</span> Required</p>
+        <h1 id="form-title" class="title"><span id="form-title-1">Add</span> <span id="form-title-2" class="sub plain">Expense</span></h1>
 
         <form id="expense-form" class="form" novalidate>
-          <div class="card glass form-card">
-            <label id="amount-label" for="amount" class="field-label">
-              <span>Amount <span class="req" aria-hidden="true">*</span></span>
-            </label>
-            <div id="amount-panel" class="amount-panel">
-              <span class="currency" aria-hidden="true">RM</span>
+          <!-- The amount tile glows in the chosen category's colour. -->
+          <label id="amount-card" class="amount-card" for="amount">
+            <span class="top">
+              <span class="k">Amount <span class="req" aria-hidden="true">*</span></span>
+              <span id="amount-cat" class="cat-badge"></span>
+            </span>
+            <span class="amount-line">
+              <span class="cur" aria-hidden="true">RM</span>
               <input id="amount" class="amount-input" type="text" inputmode="decimal" required aria-required="true"
                      autocomplete="off" placeholder="0.00" aria-describedby="amount-error">
-            </div>
-            <p id="amount-error" class="field-error" hidden><span id="amount-error-icon"></span><span id="amount-error-text">Type an amount first.</span></p>
+            </span>
+            <span id="amount-error" class="amount-error" role="alert" hidden><span id="amount-error-icon"></span><span id="amount-error-text">Type an amount first.</span></span>
+          </label>
+
+          <!-- When: the phone's own date and time pickers lie invisibly over these pills. -->
+          <div id="when-pills" class="when-pills">
+            <label id="date-pill" class="when-pill">
+              <span class="ic"><span data-icon="calendar"></span></span>
+              <span style="min-width:0"><span class="k">Date</span><span id="date-label" class="v">Today</span></span>
+              <input id="date-input" type="date" aria-label="Date">
+            </label>
+            <label id="time-pill" class="when-pill">
+              <span class="ic"><span data-icon="clock"></span></span>
+              <span style="min-width:0"><span class="k">Time</span><span id="time-label" class="v"></span></span>
+              <input id="time-input" type="time" aria-label="Time">
+            </label>
+            <label id="datetime-pill" class="when-pill" hidden>
+              <span class="ic"><span data-icon="calendar"></span></span>
+              <span style="min-width:0"><span class="k">Date and time</span><span id="datetime-label" class="v"></span></span>
+              <input id="datetime-input" type="datetime-local" aria-label="Date and time">
+            </label>
           </div>
 
-          <div class="card glass">
-            <div class="panel">
-              <!-- When: the real date-and-time picker is hidden; Change opens it. -->
-              <div class="details-row">
-                <span data-icon="calendar"></span>
-                <span id="when-label" class="grow">Today</span>
-                <button id="when-change" type="button" class="link-button">Change<span class="visually-hidden"> date and time</span></button>
-                <input id="when" type="datetime-local" class="visually-hidden" tabindex="-1" aria-label="Date and time">
-              </div>
-              <!-- What: an open note field, not hidden away. -->
-              <label class="details-row">
-                <span data-icon="note"></span>
-                <input id="note" class="inline-input" type="text" maxlength="200" autocomplete="off"
-                       placeholder="Add a note" aria-label="Note (optional)">
-              </label>
-              <!-- Receipt photo: a button to add one, or the photo with Replace/Remove. -->
-              <div id="photo-row">
-                <input id="photo-input" type="file" accept="image/*" class="visually-hidden" tabindex="-1">
-                <button id="photo-add" type="button" class="details-row"><span data-icon="camera"></span><span class="grow">Add Receipt Photo</span></button>
-                <div id="photo-has" class="details-row" hidden>
-                  <img id="photo-thumb" class="photo-thumb" alt="Receipt photo">
-                  <span class="grow">Receipt photo</span>
-                  <button id="photo-replace" type="button" class="btn btn-secondary btn-small" hidden>Replace</button>
-                  <button id="photo-remove" type="button" class="btn btn-secondary btn-small is-danger">Remove</button>
-                </div>
-              </div>
+          <div class="card details">
+            <label class="note-row">
+              <span class="k">Note</span>
+              <input id="note" type="text" maxlength="200" autocomplete="off" placeholder="Add a note">
+            </label>
+            <!-- Receipt photo: a button to add one, or the photo with Replace / Remove. -->
+            <input id="photo-input" type="file" accept="image/*" class="visually-hidden" tabindex="-1">
+            <button id="photo-add" type="button" class="photo-add"><span data-icon="camera"></span><span class="grow">Add Receipt Photo</span><span class="opt">Optional</span></button>
+            <div id="photo-has" class="photo-has" hidden>
+              <button id="photo-view" type="button" class="photo-thumb-button" aria-label="View receipt photo"><img id="photo-thumb" class="photo-thumb" alt=""></button>
+              <span class="grow">Receipt<br>photo</span>
+              <button id="photo-replace" type="button" class="btn btn-secondary btn-small" hidden>Replace</button>
+              <button id="photo-remove" type="button" class="btn btn-quiet-danger btn-small">Remove</button>
             </div>
           </div>
 
-          <div class="form-section">
-            <p id="category-label" class="field-label"><span>Category <span class="req" aria-hidden="true">*</span></span></p>
-            <!-- In Edit, the category shows as one row; tap it to change. -->
-            <div id="category-row-wrap" class="card glass" style="margin:0 -6px 10px" hidden>
-              <div class="panel">
-                <button id="category-row" type="button" class="details-row category-row" aria-expanded="false" aria-controls="category-chips">
-                  <span class="grow" style="color:#4b505b">Category</span>
-                  <span id="category-value" class="value"></span>
-                  <span data-icon="next"></span>
-                </button>
-              </div>
-            </div>
-            <!-- A radio group of chips, built by app.js from CATEGORIES. -->
-            <div id="category-chips" class="chips" role="radiogroup" aria-labelledby="category-label" aria-required="true"></div>
-          </div>
+          <p id="category-label" class="category-label">Category <span class="req" aria-hidden="true">*</span></p>
+          <!-- In Edit, the category is one row with Change, since it's already set. -->
+          <button id="category-row" type="button" class="card category-row" aria-expanded="false" aria-controls="category-chips" hidden>
+            <span id="category-row-tile" class="tile"></span>
+            <span class="grow"><span class="k">Category <span class="req" aria-hidden="true">*</span></span><span id="category-value" class="v"></span></span>
+            <span class="change">Change</span>
+          </button>
+          <!-- A radio group of capsules, built by app.js from CATEGORIES. -->
+          <div id="category-chips" class="chips" role="radiogroup" aria-labelledby="category-label" aria-required="true"></div>
 
-          <div id="form-banner" class="banner banner-error form-banner" role="alert" hidden></div>
-          <button id="save-button" type="submit" class="btn btn-primary btn-block form-submit">Record Expense</button>
+          <div class="form-spacer"></div>
+          <div id="form-banner" class="notice notice-red" role="alert" hidden></div>
+          <button id="save-button" type="submit" class="btn btn-primary btn-block form-submit">Save Expense</button>
         </form>
       </section>
     </main>
 
-    <!-- Navigation: labelled tabs in a glass pill, plus a separate Add button. -->
+    <!-- Navigation: three labelled tabs in a dark pill, plus a separate Add. -->
     <nav id="tabbar" class="tabbar" aria-label="Main">
-      <div class="tabs glass">
-        <button type="button" class="tab" data-screen="overview"><span data-icon="home"></span>Home</button>
-        <button type="button" class="tab" data-screen="history"><span data-icon="history"></span>History</button>
-        <button type="button" class="tab" data-screen="settings"><span data-icon="settings"></span>Settings</button>
+      <div class="tabs">
+        <button type="button" class="tab" data-screen="overview"><span data-icon="home" data-size="22"></span>Home</button>
+        <button type="button" class="tab" data-screen="history"><span data-icon="history" data-size="22"></span>History</button>
+        <button type="button" class="tab" data-screen="settings"><span data-icon="settings" data-size="22"></span>Settings</button>
       </div>
-      <button type="button" class="btn btn-primary add-tab" data-screen="add"><span data-icon="plus"></span>Add</button>
+      <button id="add-tab" type="button" class="add-tab" data-screen="add" aria-label="Add Expense"><span data-icon="plus" data-size="22"></span>Add</button>
     </nav>
 
     <!-- Replaces the tabs while choosing entries in History. -->
     <div id="selectbar" class="selectbar" hidden>
-      <div class="glass">
-        <button id="delete-selected" type="button" class="btn btn-secondary is-danger btn-block" disabled>Select Entries First</button>
+      <div class="bar">
+        <button id="delete-selected" type="button" class="btn btn-danger" disabled>Select Entries First</button>
       </div>
     </div>
 
@@ -188,6 +174,7 @@
        page, and the Escape key closes it. app.js fills in each one. -->
   <dialog id="sheet" class="sheet" aria-labelledby="sheet-title"></dialog>
   <dialog id="receipt-viewer" class="viewer" aria-labelledby="viewer-title"></dialog>
+  <dialog id="page-dialog" class="page-dialog" aria-labelledby="page-title"></dialog>
 
 </body>
 </html>

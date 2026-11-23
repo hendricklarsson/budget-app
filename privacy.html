@@ -4,68 +4,89 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Privacy Policy · Sen Tracker</title>
+  <meta name="theme-color" content="#07080b">
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="icons/icon-192.png">
 </head>
-<body data-mesh="bloom">
+<body data-wash="vault">
   <div class="mesh" aria-hidden="true"></div>
   <!-- Google requires a privacy policy link before the sign-in can be
        published to everyone. Keep this page true: update it if the app
        starts collecting anything new. -->
   <main class="page">
-    <p><a class="btn btn-secondary btn-small" href="./">← Back to Sen Tracker</a></p>
-    <div class="panel" style="margin-top:20px">
+    <p><a class="btn btn-secondary btn-back" href="./">← Back to Sen Tracker</a></p>
+    <div class="card">
     <h1>Privacy Policy</h1>
-    <p class="muted">Last updated: 22 November 2026</p>
+    <p>Last updated: 23 November 2026</p>
+
+    <p>
+      Sen Tracker is a free personal portfolio project, not a commercial
+      service. This page explains what it stores, where, who can read it, and
+      how you can delete it.
+    </p>
     <p>
       You can also try the app with <strong>Try the Demo</strong>: the demo uses
       sample data only, sends nothing to the server and keeps nothing after you leave.
     </p>
 
+    <h2>Encrypted on Your Phone</h2>
     <p>
-      Sen Tracker is a free personal portfolio project, not a commercial
-      service. This page explains what it stores, where, and how you can
-      delete it.
+      Before anything leaves your phone, Sen Tracker encrypts each entry's
+      <strong>amount, category, date, time and note</strong>, and your
+      <strong>receipt photos</strong>, with a key that only your passphrase or
+      your recovery code can unlock. Your passphrase and recovery code never
+      leave your phone. The server stores only the scrambled result, so
+      <strong>the developer can't read your entries or see your photos</strong>.
+    </p>
+    <p>
+      This also means nobody can reset your passphrase for you. If you forget
+      both your passphrase and your recovery code, your entries can't be
+      opened by anyone, and the only way forward is to delete them and start
+      fresh.
     </p>
 
-    <h2>What the App Stores</h2>
+    <h2>What the Developer Can See</h2>
     <ul>
       <li><strong>Your Google email address</strong>, from "Sign in with Google", to keep your entries separate from everyone else's. The app does not ask Google for anything else (no contacts, files or calendar).</li>
-      <li><strong>The expenses you enter</strong>: amount, category, date and time, and note.</li>
-      <li><strong>The name you choose in Settings</strong>, if you change it. It is kept on your device only, for your statements.</li>
-      <li><strong>Receipt photos</strong>, if you add them. Photos are shrunk on your device before upload.</li>
+      <li><strong>How many entries you have</strong> and <strong>when each was created</strong>.</li>
+      <li><strong>The size of each receipt photo</strong> (not the photo itself).</li>
+      <li><strong>Your locked key box</strong>: your key, locked with your passphrase and recovery code. Without one of those it can't be opened.</li>
     </ul>
 
     <h2>Where It Is Stored</h2>
     <p>
-      Your entries are stored in a Google Sheet, and your receipt photos in a
-      private Google Drive folder, both in the developer's personal Google
-      account. They are not shared with anyone.
+      The encrypted entries are stored in a Google Sheet, and the encrypted
+      receipt photos in a private Google Drive folder, both in the developer's
+      personal Google account. They are not shared with anyone.
     </p>
     <p>
-      On your own device, the app keeps a copy of your entries and your
-      sign-in so it opens quickly. Signing out removes them from the device.
+      On your own device, the app keeps an encrypted copy of your entries so it
+      opens quickly, even offline. With <strong>Remember on This Device</strong>
+      on, it also keeps your key on this device, so you don't have to type your
+      passphrase each time. <strong>Settings → Forget This Device</strong>
+      removes it. The name you choose in Settings is kept on your device only.
     </p>
 
-    <h2>Who Can See It</h2>
+    <h2>Entries From Before Encryption</h2>
     <p>
-      In the app, only you can see your data: every request is checked
-      against your Google sign-in, and you only ever get your own entries
-      back. As the owner of the Sheet and Drive folder, the developer can
-      technically see the stored data, and only looks at it when needed to
-      fix a problem.
+      Entries added before encryption arrived (November 2026) were stored
+      readable. When you make your passphrase, the app encrypts them and
+      replaces the readable copies, and their photos are moved to the trash,
+      which Google empties within 30 days.
     </p>
+
+    <h2>Never Sold or Shared</h2>
     <p>
-      Your data is never sold, shared, or used for advertising. The app has
-      no ads and no analytics or tracking.
+      Your data is never sold, shared, or used for advertising. The app has no
+      ads and no analytics or tracking.
     </p>
 
     <h2>Deleting Your Data</h2>
     <p>
       Deleting an entry in History removes it from the Sheet and moves its
-      receipt photo to the trash. To remove everything at once, open
-      <strong>Settings → Delete my data</strong> at any time. Photos in the
-      trash are deleted permanently by Google within 30 days.
+      photo to the trash. To remove everything at once, including your locked
+      key box, open <strong>Settings → Delete Account</strong> at any time.
+      Photos in the trash are deleted permanently by Google within 30 days.
     </p>
 
     <h2>Fair-Use Limits</h2>
