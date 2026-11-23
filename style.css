@@ -119,6 +119,10 @@
    feedback instead: buttons shrink a little (.btn:active), and rows and
    tiles dim (below). The keyboard focus ring is not affected. */
 * { -webkit-tap-highlight-color: transparent; }
+/* Chrome also draws a blue outline around a pop-up (or anything focused by
+   code) when it opens. Only show a ring when it helps: the white keyboard
+   ring below (:focus-visible) stays. */
+:focus:not(:focus-visible), dialog:focus { outline: none; }
 button.row:active, .list-row:active, .day:active, .filter:active, .chip:active, .pick:active,
 .when-pill:active, .category-row:active, .photo-add:active, .tab:active, .link-button:active { opacity: 0.7; }
 
