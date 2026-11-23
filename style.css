@@ -829,7 +829,10 @@ button.row { border-radius: 16px; }
 .signin .mark { margin: 0 6px 6px; }
 .signin .title, .signin .lede { padding: 0 6px; }
 .signin .spacer { flex: 1; }
-.google-button { min-height: 52px; display: flex; justify-content: center; align-items: center; }
+.google-button { min-height: 44px; display: flex; justify-content: center; align-items: center; }
+/* Google's button is at most 44px tall and 400px wide, so the Demo button
+   below it matches: the same height, and no wider than 400px. */
+.signin #demo-button { height: 44px; border-radius: 22px; max-width: 400px; align-self: center; }
 /* Google draws its button in a frame. Browsers paint a solid white box
    behind a frame whose colour scheme differs from the page (our page is
    dark, Google's frame is light), so this frame is marked light too, which

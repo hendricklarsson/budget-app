@@ -469,13 +469,29 @@ function initGoogleSignIn() {
     callback: handleCredential,
     auto_select: true,
   });
+  drawGoogleButton();
+  window.addEventListener('resize', drawGoogleButton);
+}
+
+/**
+ * Draws Google's button as wide as the Demo button below it. Google caps
+ * its width at 400px and its height at 44px, so the Demo button on this
+ * screen is 44px tall too (see .signin .btn in style.css). It can only be
+ * measured while the sign-in screen is showing, so showSignIn() calls this.
+ */
+function drawGoogleButton() {
+  if (typeof google === 'undefined' || !google.accounts || $('signin-screen').hidden) return;
+  const width = Math.round(Math.min(400, Math.max(200, $('demo-button').getBoundingClientRect().width)));
   const box = $('google-button');
+  if (Number(box.dataset.width) === width) return;
+  box.dataset.width = width;
+  box.replaceChildren();
   google.accounts.id.renderButton(box, {
     theme: 'filled_black',
     size: 'large',
     shape: 'pill',
     text: 'signin_with',
-    width: Math.min(400, Math.max(200, box.clientWidth || 340)),
+    width,
   });
 }
 
@@ -1136,6 +1152,7 @@ function showSignIn(message = '', kind = 'info') {
   $('app-screen').hidden = true;
   $('vault-screen').hidden = true;
   $('signin-screen').hidden = false;
+  drawGoogleButton();
   const box = $('signin-message');
   setChildren(box);
   box.hidden = !message;
