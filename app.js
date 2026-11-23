@@ -47,7 +47,7 @@ const EXPIRY_MARGIN_MS = 60 * 1000;            // treat tokens as expired 1 min 
 const REFRESH_BEFORE_MS = 5 * 60 * 1000;       // try to renew the sign-in 5 min before it ends
 const PHOTO_MAX_SIZE = 1280;                   // longest side of a receipt photo, in pixels
 const PHOTO_QUALITY = 0.75;                    // JPEG quality: text stays readable, files ~150 KB
-const CODE_URL = 'https://github.com/hendricklarsson/budget-app';
+const CODE_URL = 'https://github.com/hendricklarsson/sen-tracker';
 
 // Everything the app currently knows, in one place.
 const state = {
