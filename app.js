@@ -456,8 +456,8 @@ async function demoApi(action, data) {
 
 /**
  * Sets up "Sign in with Google" and draws its button. Google draws the
- * button itself (we can't restyle it), so we pick its white pill version,
- * the closest match to the design's white Sign In button.
+ * button itself (we can't restyle it), so we pick its black pill version,
+ * which sits well on the dark sign-in screen.
  */
 function initGoogleSignIn() {
   if (typeof google === 'undefined' || !google.accounts) {
@@ -471,7 +471,7 @@ function initGoogleSignIn() {
   });
   const box = $('google-button');
   google.accounts.id.renderButton(box, {
-    theme: 'outline',
+    theme: 'filled_black',
     size: 'large',
     shape: 'pill',
     text: 'signin_with',
