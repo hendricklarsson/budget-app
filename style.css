@@ -115,6 +115,13 @@
 
 * { box-sizing: border-box; }
 
+/* Android draws a blue box over anything tapped. The app gives its own
+   feedback instead: buttons shrink a little (.btn:active), and rows and
+   tiles dim (below). The keyboard focus ring is not affected. */
+* { -webkit-tap-highlight-color: transparent; }
+button.row:active, .list-row:active, .day:active, .filter:active, .chip:active, .pick:active,
+.when-pill:active, .category-row:active, .photo-add:active, .tab:active, .link-button:active { opacity: 0.7; }
+
 /* Keep space at the bottom when scrolling to a focused control, so the tab
    bar never hides it. */
 html { -webkit-text-size-adjust: 100%; scroll-padding-bottom: 130px; }
