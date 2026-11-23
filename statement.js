@@ -30,29 +30,21 @@ const SenStatement = (() => {
   const INK = [0.043, 0.051, 0.071];   // #0b0d12
   const MUTED = [0.337, 0.357, 0.4];   // #565b66
   const RULE = [0.86, 0.87, 0.89];
-  // Colours from the app (layouts v9), adjusted for white paper: fills and
-  // dots use the app's bright category colours; words stay dark enough to
-  // read (4.5:1 or better on white).
-  const GREEN = [0.059, 0.416, 0.290];        // less than last month (text)
-  const GREEN_FILL = [0.863, 0.976, 0.925];   // the app's mint pill, on paper
-  const GREEN_BORDER = [0.561, 0.902, 0.765];
-  const RED = [0.702, 0.149, 0.118];          // more than last month (text)
-  const RED_FILL = [1.000, 0.890, 0.890];
-  const RED_BORDER = [1.000, 0.690, 0.690];
-  const PINK = [1.000, 0.373, 0.682];         // the biggest day (the app's picked-day glow)
-  const PINK_INK = [0.690, 0.078, 0.373];     // its label
-  const INDIGO = [0.478, 0.463, 1.000];       // other days (the app's week ovals)
-  const LILAC = [0.725, 0.659, 1.000];        // this month's comparison bar
-  const GREY_BAR = [0.561, 0.576, 0.627];     // last month's comparison bar
-  const HERO = [[0.071, 0.055, 0.180], [0.165, 0.102, 0.549], [0.353, 0.114, 0.471]]; // the Overview card: indigo to plum
-  const HERO_INK = [0.902, 0.886, 1.000];
-  const WARN_FILL = [1.000, 0.953, 0.839];    // the "In Progress" notice (the app's amber)
-  const WARN_BORDER = [1.000, 0.761, 0.239];
-  const WARN_INK = [0.361, 0.239, 0.000];
-  const CATEGORY_COLORS = {            // the app's category colours (v9)
-    Food: [1.000, 0.478, 0.271], Transport: [0.247, 0.714, 1.000], Bills: [0.545, 0.424, 1.000],
-    Shopping: [1.000, 0.373, 0.682], Health: [0.263, 0.878, 0.627], Entertainment: [1.000, 0.761, 0.239],
-    Other: [0.604, 0.651, 0.769],
+  const GREEN = [0.122, 0.42, 0.208];        // less than last month
+  const GREEN_FILL = [0.89, 0.957, 0.906];
+  const GREEN_BORDER = [0.73, 0.86, 0.76];
+  const RED = [0.706, 0.137, 0.094];         // more than last month
+  const RED_FILL = [1, 0.925, 0.918];
+  const RED_BORDER = [0.95, 0.72, 0.7];
+  const ORANGE = [0.851, 0.329, 0.118];      // the biggest day
+  const SLATE = [0.32, 0.38, 0.52];          // other days
+  const WARN_FILL = [1, 0.957, 0.839];       // the "In Progress" notice
+  const WARN_BORDER = [0.91, 0.788, 0.478];
+  const WARN_INK = [0.361, 0.239, 0];
+  const CATEGORY_COLORS = {            // the app's category colours
+    Food: [0.851, 0.329, 0.118], Transport: [0.169, 0.541, 0.275], Bills: [0.384, 0.278, 0.847],
+    Shopping: [0.812, 0.216, 0.518], Health: [0.043, 0.525, 0.596], Entertainment: [0.612, 0.435, 0],
+    Other: [0.365, 0.392, 0.447],
   };
   const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
                   'September', 'October', 'November', 'December'];
@@ -382,27 +374,9 @@ const SenStatement = (() => {
       roundedPath(x, top, w, h, r) + ' ' + mode + ' Q');
   }
 
-  /**
-   * A rounded box filled with the Overview card's indigo-to-plum gradient,
-   * drawn as thin bands (decoration). White text on it stays above 7:1.
-   */
-  function heroBox(doc, x, top, w, h, r) {
-    const bands = 40;
-    const ops = ['q', roundedPath(x, top, w, h, r), 'W n'];
-    for (let i = 0; i < bands; i++) {
-      const t = i / (bands - 1);
-      const [a, b, k] = t < 0.45 ? [HERO[0], HERO[1], t / 0.45] : [HERO[1], HERO[2], (t - 0.45) / 0.55];
-      const c = a.map((v, j) => v + (b[j] - v) * k);
-      const y0 = top + (h * i) / bands;
-      ops.push(color(c) + ' rg ' + f(x) + ' ' + f(PAGE_H - y0 - h / bands - 0.5) + ' ' + f(w) + ' ' + f(h / bands + 0.5) + ' re f');
-    }
-    ops.push('Q');
-    paint(doc, ops.join(' '));
-  }
-
   /** A category colour dot centred at (x, y) (decoration: the name is beside it). */
   function dot(doc, x, y, category) {
-    const r = 3.6;
+    const r = 3.2;
     paint(doc, 'q ' + color(CATEGORY_COLORS[category] || MUTED) + ' rg ' + roundedPath(x - r, y - r, r * 2, r * 2, r) + ' f Q');
   }
 
@@ -527,8 +501,8 @@ const SenStatement = (() => {
         ', as of ' + generated + '. Later spending is not included.', 'R', 10, RIGHT - LEFT - 120);
       const h = 18 + lines.length * 13;
       box(doc, LEFT, y, RIGHT - LEFT, h, 8, { stroke: WARN_BORDER, fill: WARN_FILL });
-      box(doc, LEFT + 10, y + h / 2 - 9, 86, 18, 9, { stroke: null, fill: WARN_BORDER });
-      text(doc, p, LEFT + 53, y + h / 2 + 3.4, 'IN PROGRESS', { font: 'B', size: 8.5, fill: WARN_INK, align: 'center' });
+      box(doc, LEFT + 10, y + h / 2 - 9, 86, 18, 4, { stroke: null, fill: WARN_INK });
+      text(doc, p, LEFT + 53, y + h / 2 + 3.4, 'IN PROGRESS', { font: 'B', size: 8.5, fill: [1, 1, 1], align: 'center' });
       lines.forEach((line, i) => text(doc, p, LEFT + 108, y + 15 + i * 13, line, { size: 10, fill: WARN_INK }));
       y += h + 14;
     }
@@ -561,12 +535,10 @@ const SenStatement = (() => {
      ['vs ' + prevName, vs ? vs.words : 'No data', vs ? vs.fill : MUTED]].forEach(([label, value, fill], i) => {
       const x = LEFT + i * (boxW + 8);
       const tint = i === 3 && vs && vs.fill !== MUTED ? (vs.fill === GREEN ? [GREEN_FILL, GREEN_BORDER] : [RED_FILL, RED_BORDER]) : [null, RULE];
-      // The total leads, on the same indigo-to-plum as the app's Overview card.
-      if (i === 0) heroBox(doc, x, y, boxW, 50, 12);
-      else box(doc, x, y, boxW, 50, 12, { stroke: tint[1], fill: tint[0] });
+      box(doc, x, y, boxW, 50, 10, { stroke: tint[1], fill: tint[0] });
       const p = tag('P', root);
-      text(doc, p, x + 11, y + 18, label, { size: 9.5, fill: i === 0 ? HERO_INK : i === 3 && vs ? fill : MUTED });
-      text(doc, p, x + 11, y + 38, fit(doc.fonts.B, value, 14, boxW - 18), { font: 'B', size: 14, fill: i === 0 ? [1, 1, 1] : fill });
+      text(doc, p, x + 11, y + 18, label, { size: 9.5, fill: i === 3 && vs ? fill : MUTED });
+      text(doc, p, x + 11, y + 38, fit(doc.fonts.B, value, 14, boxW - 18), { font: 'B', size: 14, fill });
     });
     y += 64;
 
@@ -579,7 +551,7 @@ const SenStatement = (() => {
       .filter((c) => c.n > 0).sort((a, b) => b.amount - a.amount);
     const share = (amount) => Math.round((amount / total) * 100);
 
-    box(doc, LEFT, chartTop, leftW, 196, 14);
+    box(doc, LEFT, chartTop, leftW, 196, 10);
     text(doc, tag('H2', root), LEFT + 12, chartTop + 20, 'Where It Went', { font: 'B', size: 11.5 });
     figure(doc, 'Pie chart of spending by category: ' + cats.map((c) => c.name + ' ' + share(c.amount) + '%').join(', ') + '.', () => {
       const cx = LEFT + leftW / 2;
@@ -621,7 +593,7 @@ const SenStatement = (() => {
 
     // Spending by Day
     const dayBoxH = 104;
-    box(doc, rightX, chartTop, rightW, dayBoxH, 14);
+    box(doc, rightX, chartTop, rightW, dayBoxH, 10);
     text(doc, tag('H2', root), rightX + 12, chartTop + 20, 'Spending by Day', { font: 'B', size: 11.5 });
     const days = Object.keys(byDay);
     const biggest = days.length ? days.reduce((p, q) => (byDay[q] > byDay[p] ? q : p)) : null;
@@ -643,7 +615,7 @@ const SenStatement = (() => {
         const v = byDay[key] || 0;
         if (!v) continue;
         const hgt = Math.max(2, (v / max) * 44);
-        paint(doc, 'q ' + color(key === biggest ? PINK : INDIGO) + ' rg ' + roundedPath(x, base - hgt, step * 0.7, hgt, Math.min(1.2, step * 0.3)) + ' f Q');
+        paint(doc, 'q ' + color(key === biggest ? ORANGE : SLATE) + ' rg ' + roundedPath(x, base - hgt, step * 0.7, hgt, Math.min(1.2, step * 0.3)) + ' f Q');
       }
       rule(doc, base + 0.5, x0, x0 + plotW, 0.6, MUTED);
       text(doc, null, x0, base + 11, '1 ' + mon, { size: 8, fill: MUTED });
@@ -651,12 +623,12 @@ const SenStatement = (() => {
         text(doc, null, x0 + (daysSoFar - 0.5) * step, base + 11, daysSoFar + ' ' + mon + ' · today', { font: 'B', size: 8, align: 'center' });
       }
       text(doc, null, x0 + plotW, base + 11, lastDay + ' ' + mon, { size: 8, fill: MUTED, align: 'right' });
-      if (biggest) text(doc, null, x0, base + 25, 'Biggest: ' + dayLabel(biggest) + ', ' + rm(byDay[biggest]), { font: 'B', size: 8.5, fill: PINK_INK });
+      if (biggest) text(doc, null, x0, base + 25, 'Biggest: ' + dayLabel(biggest) + ', ' + rm(byDay[biggest]), { font: 'B', size: 8.5, fill: ORANGE });
     });
 
     // Compared With last month
     const cmpTop = chartTop + dayBoxH + 10;
-    box(doc, rightX, cmpTop, rightW, 196 - dayBoxH - 10, 14);
+    box(doc, rightX, cmpTop, rightW, 196 - dayBoxH - 10, 10);
     text(doc, tag('H2', root), rightX + 12, cmpTop + 20, 'Compared With ' + prevName, { font: 'B', size: 11.5 });
     figure(doc, prevTotal > 0
       ? monthName + (inProgress ? ' so far ' : ' ') + rm(total) + ', ' + prevName + ' ' + rm(prevTotal) + '.'
@@ -669,10 +641,10 @@ const SenStatement = (() => {
       const barW = rightW - 38 - 80;
       const max = Math.max(total, prevTotal);
       const rowsY = [cmpTop + 36, cmpTop + 52];
-      [[mon, total, LILAC], [prevName.slice(0, 3), prevTotal, GREY_BAR]].forEach(([label, v, c], i) => {
+      [[mon, total, vs && vs.fill === RED ? RED : GREEN], [prevName.slice(0, 3), prevTotal, [0.72, 0.74, 0.78]]].forEach(([label, v, c], i) => {
         text(doc, null, rightX + 12, rowsY[i] + 3, label, { size: 9, fill: MUTED });
-        paint(doc, 'q ' + color(c) + ' rg ' + roundedPath(barX, rowsY[i] - 5, Math.max(2, (v / max) * barW), 9, 4.5) + ' f Q');
-        text(doc, null, RIGHT - 12, rowsY[i] + 3, rm(v), { font: i === 0 ? 'B' : 'R', size: 9, fill: i === 0 && vs ? vs.fill : INK, align: 'right' });
+        paint(doc, 'q ' + color(c) + ' rg ' + roundedPath(barX, rowsY[i] - 5, Math.max(2, (v / max) * barW), 9, 1.5) + ' f Q');
+        text(doc, null, RIGHT - 12, rowsY[i] + 3, rm(v), { font: i === 0 ? 'B' : 'R', size: 9, fill: i === 0 ? c : INK, align: 'right' });
       });
       text(doc, null, rightX + 12, cmpTop + 70, monthName + (inProgress ? ' so far' : '') + ' vs all of ' + prevName + '.', { size: 8.5, fill: MUTED });
     });
